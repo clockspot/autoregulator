@@ -44,9 +44,16 @@
 
 unsigned long millisStart;
 
+RTC_DATA_ATTR unsigned int counter = 0;
+
 void setup() {
 
   millisStart = millis();
+  delay(500); //solves a bug of some kind
+  //https://www.instructables.com/ESP32-Deep-Sleep-Tutorial/
+  //https://simplyexplained.com/courses/programming-esp32-with-arduino/using-rtc-memory/
+
+  counter++;
 
   // pinMode(RELAY_UNSET_PIN, OUTPUT);
   // pinMode(RELAY_SET_PIN, OUTPUT);
@@ -65,9 +72,10 @@ void setup() {
     Serial.println(F("Hello world"));
   #endif
 
-  // pinMode(WAKEUP_PIN, INPUT_PULLUP);
-  // gpio_hold_en(WAKEUP_PIN); //https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/gpio.html#_CPPv316rtc_gpio_hold_en10gpio_num_t
-  // esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, 0);
+  pinMode(WAKEUP_PIN, INPUT_PULLUP);
+  // gpio_pullup_en(WAKEUP_PIN);
+  gpio_hold_en(WAKEUP_PIN); //https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/gpio.html#_CPPv316rtc_gpio_hold_en10gpio_num_t
+  esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, 0);
   // //TODO save further power by leveraging Deep Sleep Wake Stub?
   // //https://randomnerdtutorials.com/esp32-deep-sleep-arduino-ide-wake-up-sources/  
   
@@ -222,20 +230,12 @@ void setup() {
 
   // WiFi.disconnect(true);
   // WiFi.mode(WIFI_OFF);
-    
-} //end setup()
-
-bool dir = 0;
-
-void loop() {
-  //Once setup is done, quiet down and go to sleep
-  // Serial.flush();
-  // esp_deep_sleep_start();
 
 
-  stepper.setSpeed(60);
-  stepper.step(dir?40:-40);
-  dir = (dir?0:1);
+
+  // stepper.setSpeed(60);
+  // stepper.step(dir?40:-40);
+  // dir = (dir?0:1);
 
 
   display.clearBuffer();
@@ -248,12 +248,14 @@ void loop() {
   display.setFont(&FreeSans24pt7b);
   y += (24)*1.5;
   display.setCursor(0, y);
-  display.print(dir?F("Slower"):F("Faster"));
+  // display.print(dir?F("Slower"):F("Faster"));
+  display.print(counter);
 
   display.setFont(&FreeSans18pt7b);
   y += (6+18)*1.5;
   display.setCursor(0, y);
-  display.print(millis());
+  // display.print(millis());
+  display.print(millisStart);
   
   // display.setFont(&FreeSans12pt7b);
   // y += (6+12)*1.5;
@@ -276,7 +278,7 @@ void loop() {
 
   display.display();
 
-  delay(10000);
+  // delay(10000);
 
   // Serial.println("Color rectangle demo");
   // display.clearBuffer();
@@ -284,22 +286,6 @@ void loop() {
   //                  display.height(), EPD_BLACK);
   // display.fillRect((display.width() * 2) / 3, 0, display.width() / 3,
   //                  display.height(), EPD_RED);
-  // display.display();
-
-  // delay(15000);
-
-  // Serial.println("Text demo");
-  // // large block of text
-  // display.clearBuffer();
-  // display.setTextSize(1);
-  // testdrawtext(
-  //     "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur "
-  //     "adipiscing ante sed nibh tincidunt feugiat. Maecenas enim massa, "
-  //     "fringilla sed malesuada et, malesuada sit amet turpis. Sed porttitor "
-  //     "neque ut ante pretium vitae malesuada nunc bibendum. Nullam aliquet "
-  //     "ultrices massa eu hendrerit. Ut sed nisi lorem. In vestibulum purus a "
-  //     "tortor imperdiet posuere. ",
-  //     EPD_BLACK);
   // display.display();
 
   // delay(15000);
@@ -315,13 +301,13 @@ void loop() {
   // display.display();
 
   // delay(15000);
-}
 
 
+    
+} //end setup()
 
-void testdrawtext(const char *text, uint16_t color) {
-  display.setCursor(0, 0);
-  display.setTextColor(color);
-  display.setTextWrap(true);
-  display.print(text);
+void loop() {
+  //Once setup is done, quiet down and go to sleep
+  Serial.flush();
+  esp_deep_sleep_start();
 }

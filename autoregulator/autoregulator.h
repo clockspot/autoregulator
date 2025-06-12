@@ -7,6 +7,5 @@
 //Declarations
 void setup();
 void loop();
-void testdrawtext(const char *text, uint16_t color);
 
 #endif //AUTOREGULATOR_H
