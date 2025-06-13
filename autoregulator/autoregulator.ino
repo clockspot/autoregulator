@@ -24,8 +24,8 @@
   #include "Adafruit_ThinkInk.h"
   #include <Fonts/FreeSans24pt7b.h>
   #include <Fonts/FreeSans18pt7b.h>
+  #include <Fonts/FreeSansBold18pt7b.h>
   #include <Fonts/FreeSans12pt7b.h>
-  #include <Fonts/FreeSansBold12pt7b.h>
   // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSans9pt7b.h 
   // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSans12pt7b.h 
   // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSans18pt7b.h 
@@ -42,9 +42,21 @@
   Stepper stepper(MOTOR_STEPS, MOTOR_A, MOTOR_B, MOTOR_C, MOTOR_D);
 #endif
 
+#ifdef ENABLE_DS3231
+  // #include <Wire.h> //Arduino - GNU LPGL - for I2C access to DS3231
+  // #include <DS3231.h> //NorthernWidget - The Unlicense - install in your Arduino IDE
+  // DS3231 ds3231; //an object to access the ds3231 directly (temp, etc)
+  // RTClib rtc; //an object to access a snapshot of the ds3231 via rtc.now()
+  #include <RTClib.h>
+  RTC_DS3231 rtc;
+  DateTime tod;
+#endif
+
 unsigned long millisStart;
 
 RTC_DATA_ATTR unsigned int counter = 0;
+
+int displayY = 0;
 
 void setup() {
 
@@ -54,13 +66,6 @@ void setup() {
   //https://simplyexplained.com/courses/programming-esp32-with-arduino/using-rtc-memory/
 
   counter++;
-
-  // pinMode(RELAY_UNSET_PIN, OUTPUT);
-  // pinMode(RELAY_SET_PIN, OUTPUT);
-  // gpio_hold_dis(RELAY_UNSET_PIN);
-  // gpio_hold_dis(RELAY_SET_PIN);
-  // digitalWrite(RELAY_UNSET_PIN,LOW);
-  // digitalWrite(RELAY_SET_PIN,LOW);
 
   #ifdef SHOW_SERIAL
     Serial.begin(115200);
@@ -73,7 +78,6 @@ void setup() {
   #endif
 
   pinMode(WAKEUP_PIN, INPUT_PULLUP);
-  // gpio_pullup_en(WAKEUP_PIN);
   gpio_hold_en(WAKEUP_PIN); //https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/gpio.html#_CPPv316rtc_gpio_hold_en10gpio_num_t
   esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, 0);
   // //TODO save further power by leveraging Deep Sleep Wake Stub?
@@ -118,40 +122,96 @@ void setup() {
     #endif
   #endif
 
+  #ifdef ENABLE_DS3231
+    // Wire.begin();
+    rtc.begin();
+    tod = rtc.now();
+    
+    #ifdef SHOW_SERIAL
+      if(counter==1) {
+        if(tod.hour()<10) Serial.print("0");
+        Serial.print(tod.hour(),DEC);
+        Serial.print(":");
+        if(tod.minute()<10) Serial.print("0");
+        Serial.print(tod.minute(),DEC);
+        Serial.print(":");
+        if(tod.second()<10) Serial.print("0");
+        Serial.println(tod.second(),DEC);
+
+        Serial.println("Enter 'c' to set real-time clock.");
+      }
+    #endif
+  #endif
+
   #ifdef ENABLE_EINK
     #ifdef SHOW_SERIAL
       Serial.println(F("E-ink display enabled"));
     #endif
     display.begin(THINKINK_TRICOLOR);
-    display.setRotation(0);
+    display.setRotation(2); //TODO return to 0
+
+    if(counter==1) {
+      display.clearBuffer();
+      displayY = 0;
+      
+      display.setTextColor(EPD_BLACK);
+      // display.setTextColor(EPD_RED);
+      display.setFont(&FreeSansBold18pt7b);
+      displayY += (18)*1.5;
+      display.setCursor(0, displayY);
+      display.print("Hello world!");
+      #ifdef ENABLE_DS3231
+        display.setFont(&FreeSans12pt7b);
+        displayY += (6+12)*1.5;
+        display.setCursor(0, displayY);
+        display.print("Reference time:");
+
+        display.setFont(&FreeSans18pt7b);
+        displayY += (6+18)*1.5;
+        display.setCursor(0, displayY);
+        if(tod.hour()<10) display.print("0");
+        display.print(tod.hour());
+        display.print(":");
+        if(tod.minute()<10) display.print("0");
+        display.print(tod.minute());
+        display.print(":");
+        if(tod.second()<10) display.print("0");
+        display.print(tod.second());
+
+        display.setFont(&FreeSans12pt7b);
+        displayY += (6+12)*1.5;
+        display.setCursor(0, displayY);
+        display.print("Enter 'c' to set.");
+      #endif
+      display.display();
+    }
   #endif
 
-  // //Who disturbs my slumber??
-  // if(esp_sleep_get_wakeup_cause()==ESP_SLEEP_WAKEUP_UNDEFINED) { //Cold start
+  //Who disturbs my slumber??
+  if(esp_sleep_get_wakeup_cause()==ESP_SLEEP_WAKEUP_UNDEFINED) { //Cold start
     
-  //   #ifdef SHOW_SERIAL
-  //   Serial.println(F("Cold start, wait for new program"));
-  //   #endif
+    #ifdef SHOW_SERIAL
+    Serial.println(F("Cold start, wait for new program"));
+    #endif
     
-  //   delay(3000); //let battery level indicator show for a bit
+    // delay(3000); //let battery level indicator show for a bit
 
-  //   #ifdef ENABLE_NEOPIXEL
-  //     pixels.fill(0x00FFFF); //teal to indicate cold start wait
-  //     pixels.show();
-  //   #endif
+    #ifdef ENABLE_NEOPIXEL
+      pixels.fill(0x00FFFF); //teal to indicate cold start wait
+      pixels.show();
+    #endif
 
-  //   delay(60000); //gives a chance to upload new sketch before it sleeps
-
-  //   return;
+    // delay(60000); //gives a chance to upload new sketch before it sleeps
+    return; //We'll let loop() do the delay stuff, so it can also set RTC, etc
     
-  // } //end cold start
+  } //end cold start
 
-  // //otherwise we woke from sleep, probably by ESP_SLEEP_WAKEUP_EXT0
+  //otherwise we woke from sleep, probably by ESP_SLEEP_WAKEUP_EXT0
 
-  // #ifdef SHOW_SERIAL
-  // //Serial.printf("Wake from sleep at %lu",millisStart);
-  // Serial.println(F("Wake from sleep"));
-  // #endif
+  #ifdef SHOW_SERIAL
+  //Serial.printf("Wake from sleep at %lu",millisStart);
+  Serial.println(F("Wake from sleep"));
+  #endif
 
   // //Start wifi
   // for(int attempts=0; attempts<3; attempts++) {
@@ -231,83 +291,153 @@ void setup() {
   // WiFi.disconnect(true);
   // WiFi.mode(WIFI_OFF);
 
-
+  //Here is where the magic happens
 
   // stepper.setSpeed(60);
   // stepper.step(dir?40:-40);
   // dir = (dir?0:1);
 
+  #ifdef ENABLE_EINK
+    display.clearBuffer();
+    displayY = 0;
+    
+    display.setTextColor(EPD_BLACK);
+    // display.setTextColor(EPD_RED);
 
-  display.clearBuffer();
-  
-  int y = 0;
+    // display.setFont(&FreeSans24pt7b);
+    // displayY += (24)*1.5;
+    // display.setCursor(0, displayY);
+    // display.print(counter);
 
-  display.setTextColor(EPD_BLACK);
-  // display.setTextColor(EPD_RED);
+    display.setFont(&FreeSans18pt7b);
+    displayY += (18)*1.5;
+    display.setCursor(0, displayY);
+    display.print("Wakes: ");
+    display.print(counter);
 
-  display.setFont(&FreeSans24pt7b);
-  y += (24)*1.5;
-  display.setCursor(0, y);
-  // display.print(dir?F("Slower"):F("Faster"));
-  display.print(counter);
+    // display.setFont(&FreeSans18pt7b);
+    // displayY += (6+18)*1.5;
+    // display.setCursor(0, displayY);
+    // display.print(millisStart);
 
-  display.setFont(&FreeSans18pt7b);
-  y += (6+18)*1.5;
-  display.setCursor(0, y);
-  // display.print(millis());
-  display.print(millisStart);
-  
-  // display.setFont(&FreeSans12pt7b);
-  // y += (6+12)*1.5;
-  // display.setCursor(0, y);
-  // display.print("12:34:56 +12.34s");
+    #ifdef ENABLE_DS3231
+      display.setFont(&FreeSans18pt7b);
+      displayY += (6+18)*1.5;
+      display.setCursor(0, displayY);
+      if(tod.hour()<10) display.print("0");
+      display.print(tod.hour());
+      display.print(":");
+      if(tod.minute()<10) display.print("0");
+      display.print(tod.minute());
+      display.print(":");
+      if(tod.second()<10) display.print("0");
+      display.print(tod.second());
+    #endif
 
-  // display.setFont(&FreeSansBold12pt7b);
-  // y += (6+12)*1.5;
-  // display.setCursor(0, y);
-  // display.print("Nert Bisels");
+    display.display();
 
-  // display.setFont(&FreeSans12pt7b);
-  // y += (6+12)*1.5;
-  // display.setCursor(0, y);
-  // display.print("Lood Janglosti");
+  #endif
 
-  // y += (6+12)*1.5;
-  // display.setCursor(0, y);
-  // display.print("Gaetan Bamphous");
-
-  display.display();
-
-  // delay(10000);
-
-  // Serial.println("Color rectangle demo");
-  // display.clearBuffer();
-  // display.fillRect(display.width() / 3, 0, display.width() / 3,
-  //                  display.height(), EPD_BLACK);
-  // display.fillRect((display.width() * 2) / 3, 0, display.width() / 3,
-  //                  display.height(), EPD_RED);
-  // display.display();
-
-  // delay(15000);
-
-  // display.clearBuffer();
-  // for (int16_t i = 0; i < display.width(); i += 4) {
-  //   display.drawLine(0, 0, i, display.height() - 1, EPD_BLACK);
-  // }
-
-  // for (int16_t i = 0; i < display.height(); i += 4) {
-  //   display.drawLine(display.width() - 1, 0, 0, i, EPD_RED);
-  // }
-  // display.display();
-
-  // delay(15000);
-
-
+  //Once setup is done, quiet down and go to sleep
+  goToSleep();
     
 } //end setup()
 
+
+int inputStage = 0;
+int incomingByte = 0;
+
 void loop() {
-  //Once setup is done, quiet down and go to sleep
+
+  //Code for setting DS3231 from terminal
+  #ifdef SHOW_SERIAL
+    #ifdef ENABLE_DS3231
+      if(Serial.available()>0) {
+        String readString;
+        while(Serial.available()) {
+          char c = Serial.read();
+          if(c!=10) readString += c;
+          delay(2);
+        }
+        Serial.print("You entered string ");
+        Serial.println(readString);
+        if(readString=="c") inputStage=1;
+        int incomingInt = readString.toInt();
+        switch(inputStage) {
+          case 1:
+            Serial.println("Enter hour:");
+            inputStage++;
+            break;
+          case 2:
+            Serial.print("You entered int ");
+            Serial.println(incomingInt,DEC);
+            Serial.print("tod hour="); Serial.println(tod.hour(),DEC);
+            // ds3231.setClockMode(false);
+            // ds3231.setHour(incomingInt);
+            rtc.adjust(DateTime(2025,6,12,incomingInt,0,0));
+            tod = rtc.now();
+            Serial.print("tod hour="); Serial.println(tod.hour(),DEC);
+            Serial.println("Enter minute:");
+            inputStage++;
+            break;
+          case 3:
+            Serial.print("You entered ");
+            Serial.println(incomingInt,DEC);
+            // ds3231.setMinute(incomingInt);
+            tod = rtc.now();
+            rtc.adjust(DateTime(2025,6,12,tod.hour(),incomingInt,0));
+            Serial.println("Enter second:");
+            inputStage++;
+            break;
+          case 4:
+            Serial.print("You entered ");
+            Serial.println(incomingInt,DEC);
+            // ds3231.setSecond(incomingInt);
+            tod = rtc.now();
+            rtc.adjust(DateTime(2025,6,12,tod.hour(),tod.minute(),incomingInt));
+            Serial.print("Clock set to: ");
+            tod = rtc.now();
+            if(tod.hour()<10) Serial.print("0");
+            Serial.print(tod.hour(),DEC);
+            Serial.print(":");
+            if(tod.minute()<10) Serial.print("0");
+            Serial.print(tod.minute(),DEC);
+            Serial.print(":");
+            if(tod.second()<10) Serial.print("0");
+            Serial.println(tod.second(),DEC);
+            #ifdef ENABLE_EINK
+              display.clearBuffer();
+              displayY = 0;
+              display.setTextColor(EPD_BLACK);
+              display.setFont(&FreeSans18pt7b);
+              displayY += 18*1.5;
+              display.setCursor(0, displayY);
+              display.print("Clock set to: ");
+              displayY += (6+18)*1.5;
+              display.setCursor(0, displayY);
+              if(tod.hour()<10) display.print("0");
+              display.print(tod.hour());
+              display.print(":");
+              if(tod.minute()<10) display.print("0");
+              display.print(tod.minute());
+              display.print(":");
+              if(tod.second()<10) display.print("0");
+              display.print(tod.second());
+              display.display();
+            #endif
+            inputStage==0;
+            break;
+          default: break;
+        }
+      }
+    #endif
+  #endif
+
+  if(millis()-millisStart>120000) goToSleep();
+
+}
+
+void goToSleep() {
   Serial.flush();
   esp_deep_sleep_start();
 }

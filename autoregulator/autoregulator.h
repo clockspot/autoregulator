@@ -7,5 +7,7 @@
 //Declarations
 void setup();
 void loop();
+void goToSleep();
+void moveMotor(bool dir);
 
 #endif //AUTOREGULATOR_H
