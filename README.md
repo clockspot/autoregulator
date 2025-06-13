@@ -176,3 +176,8 @@ Each time it is triggered, the autoregulator obtains a reference time (NTP or qu
 - It makes a temporary adjustment to correct the clock's offset from the reference time. If the previous trigger made such an adjustment, it reverses it.
 
 The first adjustment (after the second trigger) is arbitrary, used to determine the adjustment factor. 
+
+
+About the Host Clock
+
+This Ericsson master clock uses a Swiss Moser-Baer movement that generates alternating-polarity impulses with a pair of double-throw mercury switches, used to wind the clock and drive a secondary clock circuit. It's also equipped with a bell circuit, which is used here to trigger the Autoregulator every hour. The dial and pendulum are custom-fabricated, and the paper condenser has been disconnected in favor of a modern ceramic capacitor; otherwise it remains original.

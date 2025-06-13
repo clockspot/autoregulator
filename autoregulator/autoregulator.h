@@ -9,5 +9,6 @@ void setup();
 void loop();
 void goToSleep();
 void moveMotor(bool dir);
+void resetMotor();
 
 #endif //AUTOREGULATOR_H

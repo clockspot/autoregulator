@@ -22,18 +22,14 @@
 
 #ifdef ENABLE_EINK
   #include "Adafruit_ThinkInk.h"
+  // #include <Fonts/FreeSansBold24pt7b.h>
   #include <Fonts/FreeSans24pt7b.h>
+  // #include <Fonts/FreeSansBold18pt7b.h>
   #include <Fonts/FreeSans18pt7b.h>
-  #include <Fonts/FreeSansBold18pt7b.h>
+  #include <Fonts/FreeSansBold12pt7b.h>
   #include <Fonts/FreeSans12pt7b.h>
-  // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSans9pt7b.h 
-  // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSans12pt7b.h 
-  // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSans18pt7b.h 
-  // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSans24pt7b.h 
-  // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSansBold9pt7b.h 
-  // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSansBold12pt7b.h 
-  // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSansBold18pt7b.h 
-  // /Users/luke/Documents/Arduino/libraries/Adafruit_GFX_Library/Fonts/FreeSansBold24pt7b.h
+  // #include <Fonts/FreeSansBold9pt7b.h>
+  // #include <Fonts/FreeSans9pt7b.h>
   ThinkInk_154_Tricolor_Z90 display(EPD_DC, EPD_RESET, EPD_CS, SRAM_CS, EPD_BUSY, EPD_SPI);
 #endif
 
@@ -54,7 +50,17 @@
 
 unsigned long millisStart;
 
-RTC_DATA_ATTR unsigned int counter = 0;
+// RTC_DATA_ATTR unsigned int counter = 0;
+RTC_DATA_ATTR unsigned long motorCur = 0; //where the regulator motor currently is vs MOTOR_MAX
+RTC_DATA_ATTR byte sampleStage = 0; //determines how much we know (which vars are reliable)
+RTC_DATA_ATTR unsigned long todLast = 0; //Reference time at most recent sample - millis per day (86400000)
+RTC_DATA_ATTR unsigned long todPrev = 0; //Reference time at the sample before that
+RTC_DATA_ATTR int rateLast //Rate for the period between these reference times - gain/loss in millis per real hour (3600000)
+RTC_DATA_ATTR int ratePrev //Rate for the period before that
+RTC_DATA_ATTR int rateFactor //How much an adjustment should be expected to affect the rate
+RTC_DATA_ATTR int adjRegLast //intended gain/loss in millis per real hour - intended to correct rate
+RTC_DATA_ATTR int adjOffLast //intended gain/loss in millis per real hour - intended to correct offset from reference time by next sample, which will reverse this
+//should you separately capture what adjustment you actually made?
 
 int displayY = 0;
 
@@ -65,16 +71,16 @@ void setup() {
   //https://www.instructables.com/ESP32-Deep-Sleep-Tutorial/
   //https://simplyexplained.com/courses/programming-esp32-with-arduino/using-rtc-memory/
 
-  counter++;
+  // counter++;
 
   #ifdef SHOW_SERIAL
     Serial.begin(115200);
     #ifdef SAMD_SERIES
       while(!Serial);
     #else
-      delay(2000);
+      // delay(2000);
     #endif
-    Serial.println(F("Hello world"));
+    // Serial.println(F("Hello world"));
   #endif
 
   pinMode(WAKEUP_PIN, INPUT_PULLUP);
@@ -125,10 +131,33 @@ void setup() {
   #ifdef ENABLE_DS3231
     // Wire.begin();
     rtc.begin();
-    tod = rtc.now();
+  #endif
+
+  #ifdef ENABLE_EINK
+    display.begin(THINKINK_TRICOLOR);
+    display.setRotation(2); //TODO return to 0
+  #endif
+
+  //Who disturbs my slumber??
+  if(esp_sleep_get_wakeup_cause()==ESP_SLEEP_WAKEUP_UNDEFINED) { //Cold start
     
     #ifdef SHOW_SERIAL
-      if(counter==1) {
+      Serial.println(F("Cold start"));
+    #endif
+  
+    #ifdef BATTERY_MONITOR_PIN
+      delay(3000); //let battery level indicator show for a bit
+    #endif
+
+    #ifdef ENABLE_NEOPIXEL
+      pixels.fill(0x00FFFF); //teal to indicate cold start wait
+      pixels.show();
+    #endif
+    
+    #ifdef ENABLE_DS3231
+      #ifdef SHOW_SERIAL
+        tod = rtc.now();
+        Serial.print("Current RTC time: ");
         if(tod.hour()<10) Serial.print("0");
         Serial.print(tod.hour(),DEC);
         Serial.print(":");
@@ -137,34 +166,29 @@ void setup() {
         Serial.print(":");
         if(tod.second()<10) Serial.print("0");
         Serial.println(tod.second(),DEC);
-
         Serial.println("Enter 'c' to set real-time clock.");
-      }
+      #endif
     #endif
-  #endif
 
-  #ifdef ENABLE_EINK
-    #ifdef SHOW_SERIAL
-      Serial.println(F("E-ink display enabled"));
-    #endif
-    display.begin(THINKINK_TRICOLOR);
-    display.setRotation(2); //TODO return to 0
-
-    if(counter==1) {
+    #ifdef ENABLE_EINK
       display.clearBuffer();
       displayY = 0;
       
       display.setTextColor(EPD_BLACK);
       // display.setTextColor(EPD_RED);
-      display.setFont(&FreeSansBold18pt7b);
-      displayY += (18)*1.5;
+      display.setFont(&FreeSansBold12pt7b);
+      displayY += (12)*1.5;
       display.setCursor(0, displayY);
-      display.print("Hello world!");
+      display.print("Autoregulator");
+      display.setFont(&FreeSans12pt7b);
+      displayY += (6+12)*1.5;
+      display.setCursor(0, displayY);
+      display.print("by @clockspot");
       #ifdef ENABLE_DS3231
         display.setFont(&FreeSans12pt7b);
-        displayY += (6+12)*1.5;
+        displayY += (6+6+12)*1.5;
         display.setCursor(0, displayY);
-        display.print("Reference time:");
+        display.print("RTC time:");
 
         display.setFont(&FreeSans18pt7b);
         displayY += (6+18)*1.5;
@@ -184,25 +208,9 @@ void setup() {
         display.print("Enter 'c' to set.");
       #endif
       display.display();
-    }
-  #endif
-
-  //Who disturbs my slumber??
-  if(esp_sleep_get_wakeup_cause()==ESP_SLEEP_WAKEUP_UNDEFINED) { //Cold start
-    
-    #ifdef SHOW_SERIAL
-    Serial.println(F("Cold start, wait for new program"));
-    #endif
-    
-    // delay(3000); //let battery level indicator show for a bit
-
-    #ifdef ENABLE_NEOPIXEL
-      pixels.fill(0x00FFFF); //teal to indicate cold start wait
-      pixels.show();
     #endif
 
-    // delay(60000); //gives a chance to upload new sketch before it sleeps
-    return; //We'll let loop() do the delay stuff, so it can also set RTC, etc
+    return; //We'll let loop() monitor for serial inputs and leave time for a new sketch upload
     
   } //end cold start
 
@@ -292,6 +300,30 @@ void setup() {
   // WiFi.mode(WIFI_OFF);
 
   //Here is where the magic happens
+  //clock difference is nominal 60 minutes - TODO make this variable / multiples - probably need a periodLast/periodPrev or such
+  //Can the motor sense when it hits the end?
+
+  /*
+  * sample
+      * Last = now (display)
+  * sample
+      * Prev = last, Last = now (display)
+      * Last rate = prev vs last (display)
+      * Assume rate factor 0 (display)
+      * Last adj per arbitrary (display)
+  * sample
+      * Prev = last, Last = now (display)
+      * Prev rate = last rate, Last rate = prev vs last (display)
+      * Last ∆ rate = prev rate vs last rate (display)
+      * rf0 = last ∆ rate vs last adj (display)
+      * Last adj per last rate (display)
+      * Last offadj per offset (display)
+          * Display intended time
+  * sample
+      * Prev = last, Last = now (display)
+      * Prev += offset (as though there were no offset) - remove offset
+      * The rest is the same except last adj is an average of the last three rfs
+  */
 
   // stepper.setSpeed(60);
   // stepper.step(dir?40:-40);
@@ -359,9 +391,15 @@ void loop() {
           if(c!=10) readString += c;
           delay(2);
         }
-        Serial.print("You entered string ");
-        Serial.println(readString);
-        if(readString=="c") inputStage=1;
+        // Serial.print("You entered string ");
+        // Serial.println(readString);
+        if(readString=="c") inputStage=1; //enter clock setting
+        if(readString=="s") goToSleep();
+        if(readString=="r") resetMotor();
+        if(readString=="u") moveMotor(1);
+        if(readString=="d") moveMotor(0);
+
+        //clock setting
         int incomingInt = readString.toInt();
         switch(inputStage) {
           case 1:
@@ -369,20 +407,20 @@ void loop() {
             inputStage++;
             break;
           case 2:
-            Serial.print("You entered int ");
-            Serial.println(incomingInt,DEC);
-            Serial.print("tod hour="); Serial.println(tod.hour(),DEC);
+            // Serial.print("You entered int ");
+            // Serial.println(incomingInt,DEC);
+            // Serial.print("tod hour="); Serial.println(tod.hour(),DEC);
             // ds3231.setClockMode(false);
             // ds3231.setHour(incomingInt);
             rtc.adjust(DateTime(2025,6,12,incomingInt,0,0));
-            tod = rtc.now();
-            Serial.print("tod hour="); Serial.println(tod.hour(),DEC);
+            // tod = rtc.now();
+            // Serial.print("tod hour="); Serial.println(tod.hour(),DEC);
             Serial.println("Enter minute:");
             inputStage++;
             break;
           case 3:
-            Serial.print("You entered ");
-            Serial.println(incomingInt,DEC);
+            // Serial.print("You entered ");
+            // Serial.println(incomingInt,DEC);
             // ds3231.setMinute(incomingInt);
             tod = rtc.now();
             rtc.adjust(DateTime(2025,6,12,tod.hour(),incomingInt,0));
@@ -390,8 +428,8 @@ void loop() {
             inputStage++;
             break;
           case 4:
-            Serial.print("You entered ");
-            Serial.println(incomingInt,DEC);
+            // Serial.print("You entered ");
+            // Serial.println(incomingInt,DEC);
             // ds3231.setSecond(incomingInt);
             tod = rtc.now();
             rtc.adjust(DateTime(2025,6,12,tod.hour(),tod.minute(),incomingInt));
@@ -428,16 +466,24 @@ void loop() {
             inputStage==0;
             break;
           default: break;
-        }
-      }
+        } //end clock setting
+      } //end if serial available
     #endif
   #endif
 
-  if(millis()-millisStart>120000) goToSleep();
+  //if(millis()-millisStart>120000) goToSleep();
 
 }
 
 void goToSleep() {
   Serial.flush();
   esp_deep_sleep_start();
+}
+
+void moveMotor(bool dir) {
+
+}
+
+void resetMotor() {
+  //Based on fixed known range of regulator motor, it will send itself all the way down, stall a while, then rise to center
 }
