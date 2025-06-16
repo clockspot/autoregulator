@@ -10,5 +10,6 @@ void loop();
 void goToSleep();
 void moveMotor(bool dir);
 void resetMotor();
+void displayPrintTime(unsigned long tod, byte milPlaces);
 
 #endif //AUTOREGULATOR_H

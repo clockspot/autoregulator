@@ -36,6 +36,7 @@
 #ifdef ENABLE_MOTOR
   #include <Stepper.h>
   Stepper stepper(MOTOR_STEPS, MOTOR_A, MOTOR_B, MOTOR_C, MOTOR_D);
+  stepper.setSpeed(60);
 #endif
 
 #ifdef ENABLE_DS3231
@@ -50,19 +51,19 @@
 
 unsigned long millisStart;
 
-// RTC_DATA_ATTR unsigned int counter = 0;
-RTC_DATA_ATTR unsigned long motorCur = 0; //where the regulator motor currently is vs MOTOR_MAX
-RTC_DATA_ATTR byte sampleStage = 0; //determines how much we know (which vars are reliable)
-RTC_DATA_ATTR unsigned long todLast = 0; //Reference time at most recent sample - millis per day (86400000)
-RTC_DATA_ATTR unsigned long todPrev = 0; //Reference time at the sample before that
-RTC_DATA_ATTR int rateLast //Rate for the period between these reference times - gain/loss in millis per real hour (3600000)
-RTC_DATA_ATTR int ratePrev //Rate for the period before that
-RTC_DATA_ATTR int rateFactor //How much an adjustment should be expected to affect the rate
-RTC_DATA_ATTR int adjRegLast //intended gain/loss in millis per real hour - intended to correct rate
-RTC_DATA_ATTR int adjOffLast //intended gain/loss in millis per real hour - intended to correct offset from reference time by next sample, which will reverse this
-//should you separately capture what adjustment you actually made?
+RTC_DATA_ATTR unsigned long triggerCount = 0;
+  //using unsigned long because, why not, if we have the space? Allows for up to 4,294,967,295 samples, which is enough for hourly samples for 500,000 years. There are only 8760 hourly samples in a year so could reasonably go with word (65535) if needed.
+RTC_DATA_ATTR long motorCur = 0; //where the regulator motor currently is vs MOTOR_MAX
+//TODO set up the reset button to trigger a resetMotor() during the first wake
+RTC_DATA_ATTR unsigned long refPrev = 0; //Reference time at most recent sample - millis per day (86400000). Known by trigger 2.
+RTC_DATA_ATTR long ratePrev //Rate for the period between these reference times - gain/loss in millis per real hour (3600000). Known by trigger 3.
+RTC_DATA_ATTR int adjRateFactor //How much an adjustment of MOTOR_STEPS should be expected to affect the rate
+RTC_DATA_ATTR int adjRegPrev //adj intended to correct rate
+RTC_DATA_ATTR int adjOffPrev //adj intended to correct offset from reference time by next sample, which will reverse this
 
 int displayY = 0;
+
+unsigned long ref = 0; //We will populate this with a reference time, either from RTC or NTP, and backdate it by the time it took to get it (100% of the time to when we start the request, and in the case of NTP, 50% of the time it takes to get the request back), so this will represent as accurately as possible the moment when the clock triggered it
 
 void setup() {
 
@@ -131,6 +132,8 @@ void setup() {
   #ifdef ENABLE_DS3231
     // Wire.begin();
     rtc.begin();
+    tod = rtc.now();
+    ref = (tod.hour()*3600000)+(tod.minute()*60000)+(tod.second()*1000); //TODO offset
   #endif
 
   #ifdef ENABLE_EINK
@@ -156,9 +159,8 @@ void setup() {
     
     #ifdef ENABLE_DS3231
       #ifdef SHOW_SERIAL
-        tod = rtc.now();
         Serial.print("Current RTC time: ");
-        if(tod.hour()<10) Serial.print("0");
+        if(ref.hour()<10) Serial.print("0");
         Serial.print(tod.hour(),DEC);
         Serial.print(":");
         if(tod.minute()<10) Serial.print("0");
@@ -171,40 +173,34 @@ void setup() {
     #endif
 
     #ifdef ENABLE_EINK
-      display.clearBuffer();
-      displayY = 0;
+      displayY = 0; display.clearBuffer();
       
       display.setTextColor(EPD_BLACK);
       // display.setTextColor(EPD_RED);
+
       display.setFont(&FreeSansBold12pt7b);
-      displayY += (12)*1.5;
-      display.setCursor(0, displayY);
+      displayY += (12)*1.5; display.setCursor(0, displayY);
       display.print("Autoregulator");
+
       display.setFont(&FreeSans12pt7b);
-      displayY += (6+12)*1.5;
-      display.setCursor(0, displayY);
+      displayY += (6+12)*1.5; display.setCursor(0, displayY);
       display.print("by @clockspot");
+
+      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+      display.print("Enter 'r' to reset motor."); //TODO
+      // display.print("Press BOOT to reset motor."); //TODO
+      
       #ifdef ENABLE_DS3231
         display.setFont(&FreeSans12pt7b);
-        displayY += (6+6+12)*1.5;
-        display.setCursor(0, displayY);
-        display.print("RTC time:");
+        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+        display.print("Current RTC time:");
 
         display.setFont(&FreeSans18pt7b);
-        displayY += (6+18)*1.5;
-        display.setCursor(0, displayY);
-        if(tod.hour()<10) display.print("0");
-        display.print(tod.hour());
-        display.print(":");
-        if(tod.minute()<10) display.print("0");
-        display.print(tod.minute());
-        display.print(":");
-        if(tod.second()<10) display.print("0");
-        display.print(tod.second());
+        displayY += (6+18)*1.5; display.setCursor(0, displayY);
+        displayPrintTime(tod.hour()*3600000 + tod.minute()*60000 + tod.second()*1000, 0);
 
         display.setFont(&FreeSans12pt7b);
-        displayY += (6+12)*1.5;
-        display.setCursor(0, displayY);
+        displayY += (6+12)*1.5; display.setCursor(0, displayY);
         display.print("Enter 'c' to set.");
       #endif
       display.display();
@@ -220,6 +216,7 @@ void setup() {
   //Serial.printf("Wake from sleep at %lu",millisStart);
   Serial.println(F("Wake from sleep"));
   #endif
+  triggerCount++;
 
   // //Start wifi
   // for(int attempts=0; attempts<3; attempts++) {
@@ -303,6 +300,145 @@ void setup() {
   //clock difference is nominal 60 minutes - TODO make this variable / multiples - probably need a periodLast/periodPrev or such
   //Can the motor sense when it hits the end?
 
+  //Having got millis1 at startup:
+  // * Capture millis2
+  // * Grab ref
+  // * Capture millis3
+  // * ref -= (millis2-millis1)+((millis3-millis2)/2) - our best guess at ref time when interrupt occurred
+
+  #ifdef ENABLE_EINK
+    display.setTextColor(EPD_BLACK);
+
+    displayY = 0; display.clearBuffer();
+    
+    display.setFont(&FreeSans18pt7b);
+    displayY += (18)*1.5; display.setCursor(0, displayY);
+    display.print("Wake: ");
+    display.print(triggerCount);
+
+    displayY += (6+18)*1.5; display.setCursor(0, displayY);
+    display.print("Time: ");
+    displayPrintTime(todNow,0); //TODO add decimals
+  #endif
+
+  if(triggerCount==1) {
+    //first wake - we have nothing
+    #ifdef ENABLE_EINK
+      display.setFont(&FreeSans12pt7b);
+      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+      display.print("At next wake,");
+
+      displayY += (6+12)*1.5; display.setCursor(0, displayY);
+      display.print("we'll know rate.");
+    #endif
+  } else {
+    //second+ wake - we have refPrev and can calculate rate
+    long period = ref - refPrev; //should be ~3600000
+    long target = 3600000;
+    //TODO estimate correct period to account for gaps
+    //TODO start over if period is outside 1%?
+      //TODO does this happen only for later triggers?
+    //TODO remove the adjoffset
+    if(period<0) period+=86400000; //midnight rollover
+
+    long long targetSq = (long long)target * target; // Promote to 64-bit (thanks Copilot!)
+    long rate = 0-(target+(targetSq/period));
+    //Examples:
+    //Period is 72 minutes (4320000 ms)
+    //0-(3600000-((3600000^2)/4320000)
+    //Rate is -600000 ms/h (-10 min/hr)
+
+    //Period is 62 minutes (3720000 ms)
+    //Rate is -116129 ms/h (-1.94 min/hr)
+    //a bit less than 2 mins, since the real hour hits first
+
+    //Period is 57 minutes (3420000 ms)
+    //Rate is +189473 ms/h (+3.15 min/hr)
+    //a bit more than 3 mins, since the clock hour hits first
+
+    #ifdef ENABLE_EINK
+      displayY += (6+18)*1.5; display.setCursor(0, displayY);
+      display.print("Rate: ");
+      displayPrintSignedDecMils(rate,2);
+    #endif
+
+    int adjReg = 0;
+
+    if(triggerCount==2) {
+      //second wake - we don't yet have ratePrev or adjRateFactor
+      //Make arbitrary adjustment
+
+      adjReg = moveMotor(rate<=0? MOTOR_STEPS: 0-MOTOR_STEPS);
+
+      #ifdef ENABLE_EINK
+        displayY += (6+6+18)*1.5; display.setCursor(0, displayY);
+        display.print("Arb Adj: ");
+        if(adjReg>=0) display.print("+");
+        display.print(adjReg);
+
+        display.setFont(&FreeSans12pt7b);
+        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+        display.print("At next wake,");
+
+        displayY += (6+18)*1.5; display.setCursor(0, displayY);
+        display.print("we'll know rate change.");
+      #endif
+
+    } else { //third+ wake - we have ratePrev so we can determine adjRateFactor from adjPrev
+
+      int rateChg = rate - ratePrev;
+
+      #ifdef ENABLE_EINK
+        display.setFont(&FreeSans12pt7b);
+        displayY += (6+12)*1.5; display.setCursor(0, displayY);
+        display.print("Prev Rate: ");
+        displayPrintSignedDecMils(ratePrev,2);
+        
+        displayY += (6+12)*1.5; display.setCursor(0, displayY);
+        display.print("Prev Adj:")
+
+        display.setFont(&FreeSans18pt7b);
+        displayY += (6+18)*1.5; display.setCursor(0, displayY);
+        display.print("Rate: ");
+        displayPrintSignedDecMils(rate,2);
+        display.print(" (");
+        displayPrintSignedDecMils(rateChg,2);
+        display.print(")");
+      #endif
+
+      //TODO at first we'll set only one adjRateFactor, but we should move to averaging it
+      if(triggerCount==3) {
+        //This will set adjRateFactor to a positive value, expanded to if adjPrev was MOTOR_STEPS (it may have been less)
+        adjRateFactor = rateChg * (MOTOR_STEPS/adjPrev);
+
+        displayY += (6+18)*1.5; display.setCursor(0, displayY);
+        display.print("Rate/Adj: ");
+        displayPrintSignedDecMils(adjRateFactor,2);
+      }
+
+      //If there is an adjOffset, reverse it TODO
+
+      adjReg = moveMotor((0-rate)*adjRateFactor); //we finally do the magic - apply a regulation adj that is opposite of current rate
+
+      displayY += (6+6+18)*1.5; display.setCursor(0, displayY);
+      display.print("Adj: ");
+      if(adjReg>=0) display.print("+");
+      display.print(adjReg);
+
+      //TODO display targeted time at correction
+
+    } //end third+ wake
+
+    adjRegPrev = adjReg;
+
+  } //end second+ wake
+
+  refPrev = ref;
+  ratePrev = rate;
+
+  display.display();
+
+
   /*
   * sample
       * Last = now (display)
@@ -325,50 +461,9 @@ void setup() {
       * The rest is the same except last adj is an average of the last three rfs
   */
 
-  // stepper.setSpeed(60);
-  // stepper.step(dir?40:-40);
-  // dir = (dir?0:1);
+  
 
-  #ifdef ENABLE_EINK
-    display.clearBuffer();
-    displayY = 0;
-    
-    display.setTextColor(EPD_BLACK);
-    // display.setTextColor(EPD_RED);
-
-    // display.setFont(&FreeSans24pt7b);
-    // displayY += (24)*1.5;
-    // display.setCursor(0, displayY);
-    // display.print(counter);
-
-    display.setFont(&FreeSans18pt7b);
-    displayY += (18)*1.5;
-    display.setCursor(0, displayY);
-    display.print("Wakes: ");
-    display.print(counter);
-
-    // display.setFont(&FreeSans18pt7b);
-    // displayY += (6+18)*1.5;
-    // display.setCursor(0, displayY);
-    // display.print(millisStart);
-
-    #ifdef ENABLE_DS3231
-      display.setFont(&FreeSans18pt7b);
-      displayY += (6+18)*1.5;
-      display.setCursor(0, displayY);
-      if(tod.hour()<10) display.print("0");
-      display.print(tod.hour());
-      display.print(":");
-      if(tod.minute()<10) display.print("0");
-      display.print(tod.minute());
-      display.print(":");
-      if(tod.second()<10) display.print("0");
-      display.print(tod.second());
-    #endif
-
-    display.display();
-
-  #endif
+  
 
   //Once setup is done, quiet down and go to sleep
   goToSleep();
@@ -396,63 +491,46 @@ void loop() {
         if(readString=="c") inputStage=1; //enter clock setting
         if(readString=="s") goToSleep();
         if(readString=="r") resetMotor();
-        if(readString=="u") moveMotor(1);
-        if(readString=="d") moveMotor(0);
+        if(readString=="m") inputStage=10; //enter motor setting
 
-        //clock setting
+        //set RTC clock and move motor
         int incomingInt = readString.toInt();
         switch(inputStage) {
-          case 1:
+          case 1: //start setting clock
             Serial.println("Enter hour:");
             inputStage++;
             break;
           case 2:
-            // Serial.print("You entered int ");
-            // Serial.println(incomingInt,DEC);
-            // Serial.print("tod hour="); Serial.println(tod.hour(),DEC);
-            // ds3231.setClockMode(false);
-            // ds3231.setHour(incomingInt);
             rtc.adjust(DateTime(2025,6,12,incomingInt,0,0));
-            // tod = rtc.now();
-            // Serial.print("tod hour="); Serial.println(tod.hour(),DEC);
             Serial.println("Enter minute:");
             inputStage++;
             break;
           case 3:
-            // Serial.print("You entered ");
-            // Serial.println(incomingInt,DEC);
-            // ds3231.setMinute(incomingInt);
             tod = rtc.now();
             rtc.adjust(DateTime(2025,6,12,tod.hour(),incomingInt,0));
             Serial.println("Enter second:");
             inputStage++;
             break;
           case 4:
-            // Serial.print("You entered ");
-            // Serial.println(incomingInt,DEC);
-            // ds3231.setSecond(incomingInt);
             tod = rtc.now();
             rtc.adjust(DateTime(2025,6,12,tod.hour(),tod.minute(),incomingInt));
             Serial.print("Clock set to: ");
             tod = rtc.now();
-            if(tod.hour()<10) Serial.print("0");
-            Serial.print(tod.hour(),DEC);
+            Serial.print(tod.hour()%10,DEC); //hour tens
+            Serial.print(tod.hour()/10,DEC); //hour ones
             Serial.print(":");
-            if(tod.minute()<10) Serial.print("0");
-            Serial.print(tod.minute(),DEC);
+            Serial.print(tod.minute()%10,DEC); //min tens
+            Serial.print(tod.minute()/10,DEC); //min ones
             Serial.print(":");
-            if(tod.second()<10) Serial.print("0");
-            Serial.println(tod.second(),DEC);
+            Serial.print(tod.minute()%10,DEC); //sec tens
+            Serial.print(tod.minute()/10,DEC); //sec ones
             #ifdef ENABLE_EINK
-              display.clearBuffer();
-              displayY = 0;
+              displayY = 0; display.clearBuffer();
               display.setTextColor(EPD_BLACK);
               display.setFont(&FreeSans18pt7b);
-              displayY += 18*1.5;
-              display.setCursor(0, displayY);
+              displayY += 18*1.5; display.setCursor(0, displayY);
               display.print("Clock set to: ");
-              displayY += (6+18)*1.5;
-              display.setCursor(0, displayY);
+              displayY += (6+18)*1.5; display.setCursor(0, displayY);
               if(tod.hour()<10) display.print("0");
               display.print(tod.hour());
               display.print(":");
@@ -465,6 +543,24 @@ void loop() {
             #endif
             inputStage==0;
             break;
+
+          case 10: //start moving motor
+            Serial.println(F("Enter steps to move motor."));
+            Serial.print(F("Current position: "));
+            Serial.println(motorCur,DEC);
+            inputStage++;
+            break;
+          case 11:
+            if(incomingInt!=0) {
+              //TODO could replace with moveMotor, but don't want it arbitrarily limited
+              stepper.step(incomingInt);
+              motorCur+=incomingInt;
+              Serial.print(F("Current position: "));
+              Serial.println(motorCur,DEC);
+            } else {
+              Serial.println("Done.");
+              inputStage==0;
+            }
           default: break;
         } //end clock setting
       } //end if serial available
@@ -480,10 +576,67 @@ void goToSleep() {
   esp_deep_sleep_start();
 }
 
-void moveMotor(bool dir) {
+void resetMotor() {
+  //Based on fixed known range of regulator motor, it will send itself all the way down, stall a while, then rise to center
 
 }
 
-void resetMotor() {
-  //Based on fixed known range of regulator motor, it will send itself all the way down, stall a while, then rise to center
+long moveMotor(long motorChange) {
+  //uses motorCur
+  if(motorChange>0) {
+    //don't move any further than MOTOR_MAX
+    //if we're at 95, and max is 100, we can't go more than 5
+    if(motorChange+motorCur > MOTOR_MAX) motorChange = MOTOR_MAX-motorCur;
+    stepper.step(motorChange);
+    motorCur+=motorChange;
+    return motorChange;
+  } else if(motorChange<0) {
+    //don't move any further than 0 + MOTOR_NEG_OVERDRIVE
+    //if it's at 35, and overdrive is 20, we can't go more than -15, to leave room for the overdrive
+    if(motorCur+motorChange-MOTOR_NEG_OVERDRIVE < 0) motorChange = 0-motorCur;
+    stepper.step(motorChange-MOTOR_NEG_OVERDRIVE); //overdrive sends it a little too far down...
+    stepper.step(MOTOR_NEG_OVERDRIVE); //then back up, to ensure each adj ends on an up movement
+    motorCur+=motorChange; //negative
+    return motorChange;
+  } else return 0;
+}
+
+void displayPrintTime(unsigned long tod, byte decPlaces) {
+  #ifdef ENABLE_EINK
+    display.print((tod/3600000)/10); //hour tens
+    display.print((tod/3600000)%10); //hour ones
+    display.print(":");
+    display.print(((tod/60000)%60)/10); //min tens
+    display.print(((tod/60000)%60)%10); //min ones
+    display.print(":");
+    display.print(((tod/1000)%60)/10); //sec tens
+    display.print(((tod/1000)%60)%10); //sec ones
+    if(decPlaces>0) {
+      display.print(".");
+      display.print((tod%1000)/100); //tenths
+      if(decPlaces>1) {
+        display.print((tod%100)/10); //hundredths
+        if(decPlaces>2) {
+          display.print((tod%10)); //hundredths
+        }
+      }
+    }
+  #endif
+}
+
+void displayPrintSignedDecMils(long mils, byte decPlaces) {
+  #ifdef ENABLE_EINK
+    if(mils>=0) display.print("+");
+    display.print(rate/1000);
+    if(decPlaces>0) {
+      display.print(".");
+      display.print((rate%1000)/100); //tenths
+      if(decPlaces>1) {
+        display.print((rate%100)/10); //hundredths
+        if(decPlaces>2) {
+          display.print((rate%10)); //thousandths
+        }
+      }
+    }
+  #endif
 }
