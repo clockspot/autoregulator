@@ -36,7 +36,6 @@
 #ifdef ENABLE_MOTOR
   #include <Stepper.h>
   Stepper stepper(MOTOR_STEPS, MOTOR_A, MOTOR_B, MOTOR_C, MOTOR_D);
-  stepper.setSpeed(60);
 #endif
 
 #ifdef ENABLE_DS3231
@@ -56,10 +55,10 @@ RTC_DATA_ATTR unsigned long triggerCount = 0;
 RTC_DATA_ATTR long motorCur = 0; //where the regulator motor currently is vs MOTOR_MAX
 //TODO set up the reset button to trigger a resetMotor() during the first wake
 RTC_DATA_ATTR unsigned long refPrev = 0; //Reference time at most recent sample - millis per day (86400000). Known by trigger 2.
-RTC_DATA_ATTR long ratePrev //Rate for the period between these reference times - gain/loss in millis per real hour (3600000). Known by trigger 3.
-RTC_DATA_ATTR int adjRateFactor //How much an adjustment of MOTOR_STEPS should be expected to affect the rate
-RTC_DATA_ATTR int adjRegPrev //adj intended to correct rate
-RTC_DATA_ATTR int adjOffPrev //adj intended to correct offset from reference time by next sample, which will reverse this
+RTC_DATA_ATTR long ratePrev = 0; //Rate for the period between these reference times - gain/loss in millis per real hour (3600000). Known by trigger 3.
+RTC_DATA_ATTR int adjRateFactor = 0; //How much an adjustment of MOTOR_STEPS should be expected to affect the rate
+RTC_DATA_ATTR int adjRegPrev = 0; //adj intended to correct rate
+RTC_DATA_ATTR int adjOffPrev = 0; //adj intended to correct offset from reference time by next sample, which will reverse this
 
 int displayY = 0;
 
@@ -141,6 +140,10 @@ void setup() {
     display.setRotation(2); //TODO return to 0
   #endif
 
+  #ifdef ENABLE_MOTOR
+    stepper.setSpeed(60);
+  #endif
+
   //Who disturbs my slumber??
   if(esp_sleep_get_wakeup_cause()==ESP_SLEEP_WAKEUP_UNDEFINED) { //Cold start
     
@@ -160,7 +163,7 @@ void setup() {
     #ifdef ENABLE_DS3231
       #ifdef SHOW_SERIAL
         Serial.print("Current RTC time: ");
-        if(ref.hour()<10) Serial.print("0");
+        if(tod.hour()<10) Serial.print("0");
         Serial.print(tod.hour(),DEC);
         Serial.print(":");
         if(tod.minute()<10) Serial.print("0");
@@ -318,7 +321,7 @@ void setup() {
 
     displayY += (6+18)*1.5; display.setCursor(0, displayY);
     display.print("Time: ");
-    displayPrintTime(todNow,0); //TODO add decimals
+    displayPrintTime(ref,0); //TODO add decimals
   #endif
 
   if(triggerCount==1) {
@@ -362,13 +365,14 @@ void setup() {
       displayPrintSignedDecMils(rate,2);
     #endif
 
-    int adjReg = 0;
+    long adjReg = 0;
 
     if(triggerCount==2) {
       //second wake - we don't yet have ratePrev or adjRateFactor
       //Make arbitrary adjustment
 
-      adjReg = moveMotor(rate<=0? MOTOR_STEPS: 0-MOTOR_STEPS);
+      adjReg = (rate<=0? MOTOR_STEPS: 0-MOTOR_STEPS);
+      adjReg = moveMotor(adjReg); //it may max out before that
 
       #ifdef ENABLE_EINK
         displayY += (6+6+18)*1.5; display.setCursor(0, displayY);
@@ -395,7 +399,8 @@ void setup() {
         displayPrintSignedDecMils(ratePrev,2);
         
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        display.print("Prev Adj:")
+        display.print("Prev Adj: ");
+        displayPrintSignedDecMils(adjRegPrev,2);
 
         display.setFont(&FreeSans18pt7b);
         displayY += (6+18)*1.5; display.setCursor(0, displayY);
@@ -409,7 +414,7 @@ void setup() {
       //TODO at first we'll set only one adjRateFactor, but we should move to averaging it
       if(triggerCount==3) {
         //This will set adjRateFactor to a positive value, expanded to if adjPrev was MOTOR_STEPS (it may have been less)
-        adjRateFactor = rateChg * (MOTOR_STEPS/adjPrev);
+        adjRateFactor = rateChg * (MOTOR_STEPS/adjRegPrev);
 
         displayY += (6+18)*1.5; display.setCursor(0, displayY);
         display.print("Rate/Adj: ");
@@ -418,7 +423,9 @@ void setup() {
 
       //If there is an adjOffset, reverse it TODO
 
-      adjReg = moveMotor((0-rate)*adjRateFactor); //we finally do the magic - apply a regulation adj that is opposite of current rate
+      //we finally do the magic - apply a regulation adj that is opposite of current rate
+      adjReg = (0-rate)*adjRateFactor;
+      adjReg = moveMotor(adjReg); //it may max out before that
 
       displayY += (6+6+18)*1.5; display.setCursor(0, displayY);
       display.print("Adj: ");
@@ -430,11 +437,11 @@ void setup() {
     } //end third+ wake
 
     adjRegPrev = adjReg;
+    ratePrev = rate;
 
   } //end second+ wake
 
   refPrev = ref;
-  ratePrev = rate;
 
   display.display();
 
@@ -627,14 +634,14 @@ void displayPrintTime(unsigned long tod, byte decPlaces) {
 void displayPrintSignedDecMils(long mils, byte decPlaces) {
   #ifdef ENABLE_EINK
     if(mils>=0) display.print("+");
-    display.print(rate/1000);
+    display.print(mils/1000);
     if(decPlaces>0) {
       display.print(".");
-      display.print((rate%1000)/100); //tenths
+      display.print((mils%1000)/100); //tenths
       if(decPlaces>1) {
-        display.print((rate%100)/10); //hundredths
+        display.print((mils%100)/10); //hundredths
         if(decPlaces>2) {
-          display.print((rate%10)); //thousandths
+          display.print((mils%10)); //thousandths
         }
       }
     }

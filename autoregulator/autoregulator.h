@@ -8,7 +8,7 @@
 void setup();
 void loop();
 void goToSleep();
-void moveMotor(bool dir);
+long moveMotor(long motorChange);
 void resetMotor();
 void displayPrintTime(unsigned long tod, byte milPlaces);
 
