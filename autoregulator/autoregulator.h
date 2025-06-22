@@ -7,5 +7,9 @@
 //Declarations
 void setup();
 void loop();
+void goToSleep();
+long moveMotor(long motorChange);
+void resetMotor();
+void displayPrintTime(unsigned long tod, byte milPlaces);
 
 #endif //AUTOREGULATOR_H
