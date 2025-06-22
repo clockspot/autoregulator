@@ -137,9 +137,11 @@ void setup() {
 
   #ifdef ENABLE_EINK
     display.begin(THINKINK_TRICOLOR);
-    display.setRotation(2); //TODO return to 0
+    display.setRotation(EINK_ROTATION);
   #endif
 
+  motorCur = MOTOR_MAX/2; //assume it's somewhere in the middle, until it is autocalibrated
+  //If the motor is not enabled, it will just pretend to drive one and display the results
   #ifdef ENABLE_MOTOR
     stepper.setSpeed(60);
   #endif
@@ -163,6 +165,11 @@ void setup() {
       pixels.show();
     #endif
     
+    #ifdef SHOW_SERIAL
+      Serial.println(F("Enter 'm' to arbitrarily move motor."));
+      Serial.println(F("Enter 'a' to autocalibrate motor."));
+    #endif
+
     #ifdef ENABLE_DS3231
       #ifdef SHOW_SERIAL
         Serial.print("Current RTC time: ");
@@ -175,13 +182,6 @@ void setup() {
         if(tod.second()<10) Serial.print("0");
         Serial.println(tod.second(),DEC);
         Serial.println("Enter 'c' to set real-time clock.");
-      #endif
-    #endif
-
-    #ifdef ENABLE_MOTOR
-      #ifdef SHOW_SERIAL
-        Serial.println(F("Enter 'm' to arbitrarily move motor."));
-        Serial.println(F("Enter 'a' to autocalibrate motor."));
       #endif
     #endif
 
@@ -230,10 +230,13 @@ void setup() {
   //otherwise we woke from sleep, probably by ESP_SLEEP_WAKEUP_EXT0
 
   #ifdef SHOW_SERIAL
-  //Serial.printf("Wake from sleep at %lu",millisStart);
-  Serial.println(F("Wake from sleep"));
+    delay(2000);
+    //Serial.printf("Wake from sleep at %lu",millisStart);
+    Serial.println(F("Wake from sleep"));
   #endif
   triggerCount++;
+
+  // ref = triggerCount*3600000; //debug
 
   // //Start wifi
   // for(int attempts=0; attempts<3; attempts++) {
@@ -323,6 +326,11 @@ void setup() {
   // * Capture millis3
   // * ref -= (millis2-millis1)+((millis3-millis2)/2) - our best guess at ref time when interrupt occurred
 
+  #ifdef SHOW_SERIAL
+    Serial.print(F("Wake ")); Serial.println(triggerCount,DEC);
+    Serial.print(F("Time ")); Serial.println(ref,DEC); //millis per day
+  #endif
+
   #ifdef ENABLE_EINK
     display.setTextColor(EPD_BLACK);
 
@@ -343,6 +351,9 @@ void setup() {
 
   if(triggerCount==1) {
     //first wake - we have nothing
+    #ifdef SHOW_SERIAL
+      Serial.println(F("At next wake, we'll know rate."));
+    #endif
     #ifdef ENABLE_EINK
       display.setFont(&FreeSans12pt7b);
       displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
@@ -353,16 +364,53 @@ void setup() {
     #endif
   } else {
     //second+ wake - we have refPrev and can calculate rate
+    #ifdef SHOW_SERIAL
+      Serial.print(F("ref: ")); Serial.println(ref,DEC);
+      Serial.print(F("refPrev: ")); Serial.println(refPrev,DEC);
+    #endif
     long period = ref - refPrev; //should be ~3600000
+    #ifdef SHOW_SERIAL
+      Serial.print(F("period: ")); Serial.println(period,DEC);
+    #endif
     long target = PERIOD_MILS;
+    #ifdef SHOW_SERIAL
+      Serial.print(F("target: ")); Serial.println(target,DEC);
+    #endif
+    if((period*20)>(target*21) || (period*20)<(target*19)) {
+      //Discard if more than 5% out (roughly)
+      #ifdef SHOW_SERIAL
+        Serial.println(F("Period is out of range, discarding"));
+      #endif
+      #ifdef ENABLE_EINK
+        display.setFont(&FreeSans12pt7b);
+        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+        display.print("Out of range.");
+
+        displayY += (6+12)*1.5; display.setCursor(0, displayY);
+        display.print("Ignoring trigger.");
+      #endif
+      display.display();
+      goToSleep();
+    }
     //TODO estimate correct period to account for gaps
     //TODO start over if period is outside 1%?
       //TODO does this happen only for later triggers?
     //TODO remove the adjoffset
     if(period<0) period+=86400000; //midnight rollover
+    #ifdef SHOW_SERIAL
+      Serial.print(F("period after midnight check: ")); Serial.println(period,DEC);
+    #endif
 
     long long targetSq = (long long)target * target; // Promote to 64-bit (thanks Copilot!)
-    long rate = 0-(target+(targetSq/period));
+    #ifdef SHOW_SERIAL
+      Serial.print(F("targetSq: ")); Serial.println(targetSq,DEC);
+      Serial.print(F("targetSq/period: ")); Serial.println(targetSq/period,DEC);
+      Serial.print(F("(0-target)+(targetSq/period): "));// Serial.println((0-target)+(targetSq/period),DEC);
+    #endif
+    long rate = (0-target)+(targetSq/period);
+    #ifdef SHOW_SERIAL
+      Serial.print(F("aka rate: ")); Serial.println(rate,DEC);
+    #endif
     //Examples:
     //Period is 72 minutes (4320000 ms)
     //0-(3600000-((3600000^2)/4320000)
@@ -383,7 +431,13 @@ void setup() {
       //Make arbitrary adjustment
 
       adjReg = (rate<=0? MOTOR_STEPS: 0-MOTOR_STEPS);
+      #ifdef SHOW_SERIAL
+        Serial.print(F("adjReg target: ")); Serial.println(adjReg,DEC);
+      #endif
       adjReg = moveMotor(adjReg); //it may max out before that
+      #ifdef SHOW_SERIAL
+        Serial.print(F("adjReg actual: ")); Serial.println(adjReg,DEC);
+      #endif
 
       #ifdef ENABLE_EINK
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
@@ -394,9 +448,12 @@ void setup() {
 
         displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
         display.setFont(&FreeSans12pt7b);
-        display.print("Adj Arb ");
+        display.print("Adj ");
         display.setFont(&FreeSansBold12pt7b);
-        displayPrintSignedDecMils(adjReg,0);
+        if(adjReg>=0) display.print("+"); display.print(adjReg);
+
+        display.setFont(&FreeSans9pt7b);
+        display.print(" (test)");
 
         display.setFont(&FreeSans12pt7b);
         displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
@@ -410,6 +467,16 @@ void setup() {
 
       int rateChg = rate - ratePrev;
 
+      //TODO at first we'll set only one adjRateFactor, but we should move to averaging it
+      if(triggerCount==3) {
+        //This will set adjRateFactor to a positive value, expanded to if adjPrev was MOTOR_STEPS (it may have been less)
+        adjRateFactor = rateChg * (MOTOR_STEPS/adjRegPrev);
+        #ifdef SHOW_SERIAL
+          Serial.print("Adj factor: ");
+          Serial.println(adjRateFactor,DEC);
+        #endif
+      }
+
       #ifdef ENABLE_EINK
         // display.setFont(&FreeSans12pt7b);
         // displayY += (6+12)*1.5; display.setCursor(0, displayY);
@@ -421,7 +488,7 @@ void setup() {
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
         display.print("Adj' ");
         display.setFont(&FreeSansBold12pt7b);
-        displayPrintSignedDecMils(adjRegPrev,2);
+        if(adjRegPrev>=0) display.print("+"); display.print(adjRegPrev);
 
         display.setFont(&FreeSans12pt7b);
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
@@ -429,35 +496,37 @@ void setup() {
         display.setFont(&FreeSansBold12pt7b);
         displayPrintSignedDecMils(rate,2);
 
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
         display.setFont(&FreeSans12pt7b);
+        displayY += (6+12)*1.5; display.setCursor(0, displayY);
         display.print("Chg ");
         display.setFont(&FreeSansBold12pt7b);
         displayPrintSignedDecMils(rateChg,2);
       #endif
 
-      //TODO at first we'll set only one adjRateFactor, but we should move to averaging it
-      if(triggerCount==3) {
-        //This will set adjRateFactor to a positive value, expanded to if adjPrev was MOTOR_STEPS (it may have been less)
-        adjRateFactor = rateChg * (MOTOR_STEPS/adjRegPrev);
-
-        display.setFont(&FreeSans9pt7b);
-        display.print(" (");
-        displayPrintSignedDecMils(adjRateFactor,2);
-        display.print(")");
-      }
+      
 
       //If there is an adjOffset, reverse it TODO
 
       //we finally do the magic - apply a regulation adj that is opposite of current rate
       adjReg = (0-rate)*adjRateFactor;
+      #ifdef SHOW_SERIAL
+        Serial.print(F("adjReg target: ")); Serial.println(adjReg,DEC);
+      #endif
       adjReg = moveMotor(adjReg); //it may max out before that
+      #ifdef SHOW_SERIAL
+        Serial.print(F("adjReg actual: ")); Serial.println(adjReg,DEC);
+      #endif
 
       displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
       display.setFont(&FreeSans12pt7b);
       display.print("Adj ");
       display.setFont(&FreeSansBold12pt7b);
-      displayPrintSignedDecMils(adjReg,0);
+      if(adjReg>=0) display.print("+"); display.print(adjReg);
+
+      display.setFont(&FreeSans9pt7b);
+      display.print(" (");
+      displayPrintSignedDecMils(adjRateFactor,2);
+      display.print(")");
 
       //TODO display targeted time at correction
 
@@ -596,7 +665,9 @@ void loop() {
           case 11:
             if(incomingInt!=0) {
               //TODO could replace with moveMotor, but don't want it arbitrarily limited
-              stepper.step(incomingInt);
+              #ifdef ENABLE_MOTOR
+                stepper.step(incomingInt);
+              #endif
               motorCur+=incomingInt;
               Serial.print(F("Current position: "));
               Serial.println(motorCur,DEC);
@@ -631,7 +702,9 @@ void loop() {
 }
 
 void goToSleep() {
-  Serial.flush();
+  #ifdef SHOW_SERIAL
+    Serial.flush();
+  #endif
   esp_deep_sleep_start();
 }
 
@@ -643,7 +716,9 @@ void resetMotor() {
     Serial.println(0-(MOTOR_MAX*1.02),DEC);
   #endif
   //Can't use moveMotor here bc it won't allow a negative movement
-  stepper.step(0-(MOTOR_MAX*1.02));
+  #ifdef ENABLE_MOTOR
+    stepper.step(0-(MOTOR_MAX*1.02));
+  #endif
   motorCur = 0;
   #ifdef SHOW_SERIAL
     Serial.print(F("Zeroed. Now centering at "));
@@ -658,15 +733,19 @@ long moveMotor(long motorChange) {
     //don't move any further than MOTOR_MAX
     //if we're at 95, and max is 100, we can't go more than 5
     if(motorChange+motorCur > MOTOR_MAX) motorChange = MOTOR_MAX-motorCur;
-    stepper.step(motorChange);
+    #ifdef ENABLE_MOTOR
+      stepper.step(motorChange);
+    #endif
     motorCur+=motorChange;
     return motorChange;
   } else if(motorChange<0) {
     //don't move any further than 0 + MOTOR_NEG_OVERDRIVE
     //if it's at 35, and overdrive is 20, we can't go more than -15, to leave room for the overdrive
     if(motorCur+motorChange-MOTOR_NEG_OVERDRIVE < 0) motorChange = 0-motorCur;
-    stepper.step(motorChange-MOTOR_NEG_OVERDRIVE); //overdrive sends it a little too far down...
-    stepper.step(MOTOR_NEG_OVERDRIVE); //then back up, to ensure each adj ends on an up movement
+    #ifdef ENABLE_MOTOR
+      stepper.step(motorChange-MOTOR_NEG_OVERDRIVE); //overdrive sends it a little too far down...
+      stepper.step(MOTOR_NEG_OVERDRIVE); //then back up, to ensure each adj ends on an up movement
+    #endif
     motorCur+=motorChange; //negative
     return motorChange;
   } else return 0;
