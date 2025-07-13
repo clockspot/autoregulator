@@ -7,13 +7,6 @@
 #include "esp_sleep.h"
 
 
-//TODO which of these are needed for NTP sync
-// #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson needs version v6 or above
-
-// #include <WiFi.h>
-// #include <WiFiClientSecure.h>
-// #include <HTTPClient.h> // Needs to be from the ESP32 platform version 3.2.0 or later, as the previous has problems with http-redirect
-
 #ifdef ENABLE_NEOPIXEL
   #include <Adafruit_NeoPixel.h>
   #define NUMPIXELS 1
@@ -46,6 +39,14 @@
   #include <RTClib.h>
   RTC_DS3231 rtc;
   DateTime tod;
+#endif
+
+#ifdef ENABLE_WIFI
+  #include <WiFi.h>
+  //TODO which of these are needed for NTP sync
+  // #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson needs version v6 or above
+  // #include <WiFiClientSecure.h>
+  // #include <HTTPClient.h> // Needs to be from the ESP32 platform version 3.2.0 or later, as the previous has problems with http-redirect
 #endif
 
 unsigned long millisStart;
@@ -138,12 +139,62 @@ void setup() {
   #ifdef ENABLE_EINK
     display.begin(THINKINK_TRICOLOR);
     display.setRotation(EINK_ROTATION);
+    display.clearBuffer();
+    //the display contents will be built up procedurally as we go, like console output
   #endif
 
   motorCur = MOTOR_MAX/2; //assume it's somewhere in the middle, until it is autocalibrated
   //If the motor is not enabled, it will just pretend to drive one and display the results
   #ifdef ENABLE_MOTOR
     stepper.setSpeed(60);
+  #endif
+
+  #ifdef ENABLE_WIFI
+    //Start wifi
+    WiFi.mode(WIFI_STA);
+    for(int attempts=0; attempts<3; attempts++) {
+      #ifdef SHOW_SERIAL
+        Serial.print(F("\nConnecting to WiFi SSID "));
+        Serial.println(WIFI_SSID);
+      #endif
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      int timeout = 0;
+      while(WiFi.status()!=WL_CONNECTED && timeout<15) {
+        timeout++; delay(1000);
+      }
+      if(WiFi.status()==WL_CONNECTED){ //did it work?
+        #ifdef ENABLE_NEOPIXEL
+          pixels.fill(0x0000FF); //blue - wifi success
+          pixels.show();
+        #endif
+        #ifdef SHOW_SERIAL
+          Serial.println(F("Connected!"));
+          //Serial.print(F("SSID: ")); Serial.println(WiFi.SSID());
+          Serial.print(F("Signal strength (RSSI): ")); Serial.print(WiFi.RSSI()); Serial.println(F(" dBm"));
+          Serial.print(F("Local IP: ")); Serial.println(WiFi.localIP());
+        #endif
+        //don't display anything on the e-ink
+        break; //leave attempts loop
+      }
+    }
+    if(WiFi.status()!=WL_CONNECTED) {
+      #ifdef SHOW_SERIAL
+        Serial.println(F("Wasn't able to connect."));
+      #endif
+      #ifdef ENABLE_NEOPIXEL
+        pixels.fill(0xFF0000); //red - no wifi success
+        pixels.show();
+        delay(1000);
+      #endif
+      #ifdef ENABLE_EINK
+        display.setTextColor(EPD_RED);
+        display.setFont(&FreeSans12pt7b);
+        displayY += (12)*1.5; display.setCursor(0, displayY);
+        display.print("WiFi failed.");
+      #endif
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+    }
   #endif
 
   //Who disturbs my slumber??
@@ -186,11 +237,8 @@ void setup() {
     #endif
 
     #ifdef ENABLE_EINK
-      displayY = 0; display.clearBuffer();
-      
       display.setTextColor(EPD_BLACK);
-      // display.setTextColor(EPD_RED);
-
+      
       display.setFont(&FreeSansBold12pt7b);
       displayY += (12)*1.5; display.setCursor(0, displayY);
       display.print("Autoregulator");
@@ -229,6 +277,8 @@ void setup() {
 
   //otherwise we woke from sleep, probably by ESP_SLEEP_WAKEUP_EXT0
 
+  String logMsg = "";
+
   #ifdef SHOW_SERIAL
     delay(2000);
     //Serial.printf("Wake from sleep at %lu",millisStart);
@@ -237,84 +287,6 @@ void setup() {
   triggerCount++;
 
   // ref = triggerCount*3600000; //debug
-
-  // //Start wifi
-  // for(int attempts=0; attempts<3; attempts++) {
-  //   #ifdef SHOW_SERIAL
-  //     Serial.print(F("\nConnecting to WiFi SSID "));
-  //     Serial.println(NETWORK_SSID);
-  //   #endif
-  //   WiFi.begin(NETWORK_SSID, NETWORK_PASS);
-  //   int timeout = 0;
-  //   while(WiFi.status()!=WL_CONNECTED && timeout<15) {
-  //     timeout++; delay(1000);
-  //   }
-  //   if(WiFi.status()==WL_CONNECTED){ //did it work?
-  //     #ifdef ENABLE_NEOPIXEL
-  //       pixels.fill(0x0000FF); //blue - wifi success
-  //       pixels.show();
-  //     #endif
-  //     #ifdef SHOW_SERIAL
-  //       Serial.println(F("Connected!"));
-  //       //Serial.print(F("SSID: ")); Serial.println(WiFi.SSID());
-  //       Serial.print(F("Signal strength (RSSI): ")); Serial.print(WiFi.RSSI()); Serial.println(F(" dBm"));
-  //       Serial.print(F("Local IP: ")); Serial.println(WiFi.localIP());
-  //     #endif
-  //     break; //leave attempts loop
-  //   }
-  // }
-  // if(WiFi.status()!=WL_CONNECTED) {
-  //   #ifdef SHOW_SERIAL
-  //     Serial.println(F("Wasn't able to connect."));
-  //   #endif
-  //   #ifdef ENABLE_NEOPIXEL
-  //     pixels.fill(0xFF0000); //red - no wifi success
-  //     pixels.show();
-  //     delay(1000);
-  //   #endif
-
-  //   WiFi.disconnect(true);
-  //   WiFi.mode(WIFI_OFF);
-  //   return;
-  // }
-
-  // //If we reach this point, wifi is OK
-  // HTTPClient http;
-  // int httpReturnCode;
-  // for(int attempts=0; attempts<3; attempts++) {
-  //   #ifdef SHOW_SERIAL
-  //     Serial.print(F("\nSending to log, attempt "));
-  //     Serial.println(attempts,DEC);
-  //   #endif
-  //   unsigned long offset = millis()-millisStart;
-  //   http.begin(String(LOG_URL)+"&offset="+String(offset));
-  //   httpReturnCode = http.GET();
-  //   if(httpReturnCode==200) {
-  //     #ifdef SHOW_SERIAL
-  //       Serial.println(F("Successful!"));
-  //     #endif
-  //     #ifdef ENABLE_NEOPIXEL
-  //       pixels.fill(0x00FF00); //green - log success
-  //       pixels.show();
-  //       delay(1000);
-  //     #endif
-  //     break; //leave attempts loop
-  //   }
-  // }
-  // if(httpReturnCode!=200) {
-  //   #ifdef SHOW_SERIAL
-  //     Serial.print(F("Not successful. Last HTTP code: "));
-  //     Serial.println(httpReturnCode,DEC);
-  //   #endif
-  //   #ifdef ENABLE_NEOPIXEL
-  //     pixels.fill(0xFF0000); //red - log failure
-  //     pixels.show();
-  //     delay(1000);
-  //   #endif
-  // }
-
-  // WiFi.disconnect(true);
-  // WiFi.mode(WIFI_OFF);
 
   //Here is where the magic happens
   //clock difference is nominal 60 minutes - TODO make this variable / multiples - probably need a periodLast/periodPrev or such
@@ -333,8 +305,6 @@ void setup() {
 
   #ifdef ENABLE_EINK
     display.setTextColor(EPD_BLACK);
-
-    displayY = 0; display.clearBuffer();
     
     display.setFont(&FreeSans12pt7b);
     displayY += (12)*1.5; display.setCursor(0, displayY);
@@ -432,7 +402,7 @@ void setup() {
     #endif
     if(targetPct<990 || targetPct>1010) {
       #ifdef SHOW_SERIAL
-        Serial.println(F("Period is out of range, discarding"));
+        Serial.println(F("Period is out of range, discarding."));
       #endif
       #ifdef ENABLE_EINK
         display.setFont(&FreeSans12pt7b);
@@ -443,7 +413,7 @@ void setup() {
         display.print("Ignoring trigger.");
       #endif
       display.display();
-      goToSleep();
+      finish(F("Period is out of range, discarding."));
     }
     //TODO remove the adjoffset
     if(period<0) period+=86400000; //midnight rollover
@@ -614,12 +584,8 @@ void setup() {
       * The rest is the same except last adj is an average of the last three rfs
   */
 
-  
-
-  
-
-  //Once setup is done, quiet down and go to sleep
-  goToSleep();
+  //Once setup is done, finish up
+  finish(logMsg);
     
 } //end setup()
 
@@ -645,7 +611,7 @@ void loop() {
         if(readString=="c") inputStage=2; //enter clock setting
         if(readString=="m") inputStage=10; //enter motor setting
         if(readString=="a") inputStage=20;
-        if(readString=="s") goToSleep();
+        if(readString=="s") finish(F("Commanded to sleep."));
 
         //set RTC clock and move motor
         int incomingInt = readString.toInt();
@@ -685,7 +651,6 @@ void loop() {
             Serial.println();
 
             #ifdef ENABLE_EINK
-              displayY = 0; display.clearBuffer();
               display.setTextColor(EPD_BLACK);
               display.setFont(&FreeSans12pt7b);
               displayY += 12*1.5; display.setCursor(0, displayY);
@@ -747,11 +712,56 @@ void loop() {
     #endif
   #endif
 
-  if(inputStage==0 && (millis()-millisStart>COLD_BOOT_SLEEP_PERIOD)) goToSleep();
+  if(inputStage==0 && (millis()-millisStart>COLD_BOOT_SLEEP_PERIOD)) finish(F("Setup timed out."));
 
 }
 
-void goToSleep() {
+void finish(String logMsg=) {
+  //Write to online database
+  if(WiFi.status()==WL_CONNECTED){
+    HTTPClient http;
+    int httpReturnCode;
+    for(int attempts=0; attempts<3; attempts++) {
+      #ifdef SHOW_SERIAL
+        Serial.print(F("\nSending to log, attempt "));
+        Serial.println(attempts,DEC);
+      #endif
+      unsigned long offset = millis()-millisStart;
+      http.begin(String(LOG_URL)+"&offset="+String(offset));
+      httpReturnCode = http.GET();
+      if(httpReturnCode==200) {
+        #ifdef SHOW_SERIAL
+          Serial.println(F("Successful!"));
+        #endif
+        #ifdef ENABLE_NEOPIXEL
+          pixels.fill(0x00FF00); //green - log success
+          pixels.show();
+          delay(1000);
+        #endif
+        break; //leave attempts loop
+      }
+    }
+    if(httpReturnCode!=200) {
+      #ifdef SHOW_SERIAL
+        Serial.print(F("Not successful. Last HTTP code: "));
+        Serial.println(httpReturnCode,DEC);
+      #endif
+      #ifdef ENABLE_NEOPIXEL
+        pixels.fill(0xFF0000); //red - log failure
+        pixels.show();
+        delay(1000);
+      #endif
+      #ifdef ENABLE_EINK
+        display.setTextColor(EPD_RED);
+        display.setFont(&FreeSans12pt7b);
+        displayY += (12)*1.5; display.setCursor(0, displayY);
+        display.print("Log failed.");
+      #endif
+    }
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+  //Go to sleep
   #ifdef SHOW_SERIAL
     Serial.flush();
   #endif
