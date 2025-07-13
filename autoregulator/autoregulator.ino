@@ -396,14 +396,14 @@ void setup() {
     #endif
     /*
     We want to discard samples that are spurious, so we discard if more than 1% out of target.
-    To calculate percentage to 3 places, we divide period by (target/1000)
+    To calculate percentage to 4 places, we divide period by (target/1000)
     Examples:
-    60min   = 3600000/3600 = 1000 = valid   (100% of 1 hour)
-    59.5min = 3570000/3600 =  991 = valid   (99.1% of 1 hour)
-    59min   = 3540000/3600 =  983 = invalid (98.3% of 1 hour)
-    120min  = 7200000/7200 = 1000 = valid   (100% of 2 hours)
-    119min  = 7140000/7200 =  991 = valid   (99.1% of 2 hours)
-    118min  = 7080000/7200 =  983 = invalid (98.3% of 2 hours)
+    60min   = 3600000/360 = 10000 = valid   (100.00% of 1 hour)
+    59.5min = 3570000/360 =  9916 = valid   ( 99.16% of 1 hour)
+    59min   = 3540000/360 =  9830 = invalid ( 98.33% of 1 hour)
+    120min  = 7200000/720 = 10000 = valid   (100.00% of 2 hours)
+    119min  = 7140000/720 =  9916 = valid   ( 99.16% of 2 hours)
+    118min  = 7080000/720 =  9833 = invalid ( 98.33% of 2 hours)
     */
     int targetPct = period/(target/1000);
     #ifdef SHOW_SERIAL
@@ -420,26 +420,21 @@ void setup() {
       displayY += (6+12)*1.5; display.setCursor(0, displayY);
       display.print("Period ");
       display.setFont(&FreeSansBold12pt7b);
-      display.print(targetPct/10,DEC);
+      display.print(targetPct/100,DEC);
       display.print(F("."));
+      display.print(abs((mils%100)/10)); //tenths
+      display.print(abs((mils%10))); //hundredths
       display.print(targetPct%10,DEC);
-      display.print(F("%"));
-      display.setFont(&FreeSans12pt7b);
-      display.print(F(" ("));
+      display.print(F("% "));
+      display.print(F(" "));
       display.print(targetmf,DEC);
-      display.print(F("x)"));
+      display.print(F("x"));
     #endif
     if(targetPct<990 || targetPct>1010) {
       #ifdef SHOW_SERIAL
         Serial.println(F("Period is out of range, discarding"));
       #endif
       #ifdef ENABLE_EINK
-        display.setFont(&FreeSans12pt7b);
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        display.print("Wake ");
-        display.setFont(&FreeSansBold12pt7b);
-        display.print(triggerCount);
-
         display.setFont(&FreeSans12pt7b);
         displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
         display.print("Out of range.");
@@ -450,9 +445,6 @@ void setup() {
       display.display();
       goToSleep();
     }
-    //TODO estimate correct period to account for gaps
-    //TODO start over if period is outside 1%?
-      //TODO does this happen only for later triggers?
     //TODO remove the adjoffset
     if(period<0) period+=86400000; //midnight rollover
     #ifdef SHOW_SERIAL
