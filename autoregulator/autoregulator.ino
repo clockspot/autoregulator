@@ -372,16 +372,74 @@ void setup() {
     #ifdef SHOW_SERIAL
       Serial.print(F("period: ")); Serial.println(period,DEC);
     #endif
-    long target = PERIOD_MILS;
+
+    //Once the clock is well-regulated, it may be many samples before the difference is appreciable,
+    //because of tolerances in the trigger (a few ticks early or late) and lack of resolution from RTC.
+    //TODO: get mils from RTC
+    //TODO: average the samples, even if they are at a delay?
+
+    /*    
+    We want to tolerate missed real samples, so we add a multiplication factor to the target.
+    multiplication factor = (period+(target/2))/target
+    the +(target/2) turns the decimal truncation into a rounding
+    Examples:
+    one hour: (3600000+(1800000))/3600000 = 1(.5)
+    1.1 hour: (3960000+(1800000))/3600000 = 1(.6)
+    1.5 hour: (5400000+(1800000))/3600000 = 2
+    1.6 hour: (5760000+(1800000))/3600000 = 2(.1)
+    2.0 hour: (7200000+(1800000))/3600000 = 2(.5)
+    */
+    int targetmf = (period+(PERIOD_MILS/2))/PERIOD_MILS;
+    long target = PERIOD_MILS*targetmf;
     #ifdef SHOW_SERIAL
       Serial.print(F("target: ")); Serial.println(target,DEC);
     #endif
-    if((period*20)>(target*21) || (period*20)<(target*19)) {
-      //Discard if more than 5% out (roughly)
+    /*
+    We want to discard samples that are spurious, so we discard if more than 1% out of target.
+    To calculate percentage to 3 places, we divide period by (target/1000)
+    Examples:
+    60min   = 3600000/3600 = 1000 = valid   (100% of 1 hour)
+    59.5min = 3570000/3600 =  991 = valid   (99.1% of 1 hour)
+    59min   = 3540000/3600 =  983 = invalid (98.3% of 1 hour)
+    120min  = 7200000/7200 = 1000 = valid   (100% of 2 hours)
+    119min  = 7140000/7200 =  991 = valid   (99.1% of 2 hours)
+    118min  = 7080000/7200 =  983 = invalid (98.3% of 2 hours)
+    */
+    int targetPct = period/(target/1000);
+    #ifdef SHOW_SERIAL
+      Serial.print(F("Period: "));
+      Serial.print(targetPct/10,DEC);
+      Serial.print(F("."));
+      Serial.print(targetPct%10,DEC);
+      Serial.print(F("% of "));
+      Serial.print(targetmf,DEC);
+      Serial.print(F("x target"));
+    #endif
+    #ifdef ENABLE_EINK
+      display.setFont(&FreeSans12pt7b);
+      displayY += (6+12)*1.5; display.setCursor(0, displayY);
+      display.print("Period ");
+      display.setFont(&FreeSansBold12pt7b);
+      display.print(targetPct/10,DEC);
+      display.print(F("."));
+      display.print(targetPct%10,DEC);
+      display.print(F("%"));
+      display.setFont(&FreeSans12pt7b);
+      display.print(F(" ("));
+      display.print(targetmf,DEC);
+      display.print(F("x)"));
+    #endif
+    if(targetPct<990 || targetPct>1010) {
       #ifdef SHOW_SERIAL
         Serial.println(F("Period is out of range, discarding"));
       #endif
       #ifdef ENABLE_EINK
+        display.setFont(&FreeSans12pt7b);
+        displayY += (6+12)*1.5; display.setCursor(0, displayY);
+        display.print("Wake ");
+        display.setFont(&FreeSansBold12pt7b);
+        display.print(triggerCount);
+
         display.setFont(&FreeSans12pt7b);
         displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
         display.print("Out of range.");
