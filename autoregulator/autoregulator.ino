@@ -553,7 +553,7 @@ void setup() {
       //If there is an adjOffset, reverse it TODO
 
       //we finally do the magic - apply a regulation adj that is opposite of current rate
-      adjReg = (0-rate)*adjRateFactor;
+      adjReg = MOTOR_STEPS*((0-rate)/adjRateFactor);
       #ifdef ENABLE_LOG
         logMsg.concat(" AdjRegTarget="); logMsg.concat(adjReg);
       #endif
