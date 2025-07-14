@@ -512,7 +512,7 @@ void setup() {
       //TODO at first we'll set only one adjRateFactor, but we should move to averaging it
       if(triggerCount==3) {
         //This will set adjRateFactor to a positive value, expanded to if adjPrev was MOTOR_STEPS (it may have been less)
-        adjRateFactor = rateChg * (MOTOR_STEPS/adjRegPrev);
+        adjRateFactor = abs(rateChg * (MOTOR_STEPS/adjRegPrev));
         // #ifdef SHOW_SERIAL
         //   Serial.print("Adj factor: ");
         //   Serial.println(adjRateFactor,DEC);
