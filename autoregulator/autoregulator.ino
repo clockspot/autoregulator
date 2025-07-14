@@ -810,46 +810,44 @@ void finish(String logMsg) {
 }
 
 void resetMotor() {
-  //Based on fixed known range of regulator motor, it will send itself all the way down, stall a while, calibrate this as 0, then rise to center
-  inputStage=20;
-  #ifdef SHOW_SERIAL
-    Serial.print(F("Moving motor to "));
-    Serial.println(0-(MOTOR_MAX*1.02),DEC);
-  #endif
-  //Can't use moveMotor here bc it won't allow a negative movement
   #ifdef ENABLE_MOTOR
-    stepper.step(0-(MOTOR_MAX*1.02));
+    //Based on fixed known range of regulator motor, it will send itself all the way down, stall a while, calibrate this as 0, then rise to center
+    inputStage=20;
+    #ifdef SHOW_SERIAL
+      Serial.print(F("Moving motor to "));
+      Serial.println(0-((MOTOR_MAX*102)/100),DEC);
+    #endif
+    //Can't use moveMotor here bc it won't allow a negative movement
+    stepper.step(0-((MOTOR_MAX*102)/100));
+    motorCur = 0;
+    #ifdef SHOW_SERIAL
+      Serial.print(F("Zeroed. Now centering at "));
+      Serial.println(MOTOR_MAX/2,DEC);
+    #endif
+    moveMotor(MOTOR_MAX/2);
   #endif
-  motorCur = 0;
-  #ifdef SHOW_SERIAL
-    Serial.print(F("Zeroed. Now centering at "));
-    Serial.println(MOTOR_MAX/2,DEC);
-  #endif
-  moveMotor(MOTOR_MAX/2);
 }
 
 long moveMotor(long motorChange) {
-  //uses motorCur
-  if(motorChange>0) {
-    //don't move any further than MOTOR_MAX
-    //if we're at 95, and max is 100, we can't go more than 5
-    if(motorChange+motorCur > MOTOR_MAX) motorChange = MOTOR_MAX-motorCur;
-    #ifdef ENABLE_MOTOR
+  #ifdef ENABLE_MOTOR
+    //uses motorCur
+    if(motorChange>0) {
+      //don't move any further than MOTOR_MAX
+      //if we're at 95, and max is 100, we can't go more than 5
+      if(motorChange+motorCur > MOTOR_MAX) motorChange = MOTOR_MAX-motorCur;
       stepper.step(motorChange);
-    #endif
-    motorCur+=motorChange;
-    return motorChange;
-  } else if(motorChange<0) {
-    //don't move any further than 0 + MOTOR_NEG_OVERDRIVE
-    //if it's at 35, and overdrive is 20, we can't go more than -15, to leave room for the overdrive
-    if(motorCur+motorChange-MOTOR_NEG_OVERDRIVE < 0) motorChange = 0-motorCur;
-    #ifdef ENABLE_MOTOR
+      motorCur+=motorChange;
+      return motorChange;
+    } else if(motorChange<0) {
+      //don't move any further than 0 + MOTOR_NEG_OVERDRIVE
+      //if it's at 35, and overdrive is 20, we can't go more than -15, to leave room for the overdrive
+      if(motorCur+motorChange-MOTOR_NEG_OVERDRIVE < 0) motorChange = 0-motorCur;
       stepper.step(motorChange-MOTOR_NEG_OVERDRIVE); //overdrive sends it a little too far down...
       stepper.step(MOTOR_NEG_OVERDRIVE); //then back up, to ensure each adj ends on an up movement
-    #endif
-    motorCur+=motorChange; //negative
-    return motorChange;
-  } else return 0;
+      motorCur+=motorChange; //negative
+      return motorChange;
+    } else return 0;
+  #endif
 }
 
 void displayPrintTime(unsigned long tod, byte decPlaces) {
