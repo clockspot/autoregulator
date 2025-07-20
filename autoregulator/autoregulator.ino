@@ -2,6 +2,13 @@
 // https://github.com/clockspot/autoregulator
 // Sketch by Luke McKenzie (luke@theclockspot.com)
 
+// TODO why does it wake up so erratically
+// TODO From wake 0 to 1, should still be able to calculate period vs target - TODO actually must document that wake 1 must occur correctly, neither skipped nor spurious
+// TODO at startup, move off stop, so that test move is always effective; don't monitor position, and just detect when change was less than effective
+// TODO Period to Per.
+// TODO get temp from DS3231
+// TODO get decimal from DS3231
+
 #include <arduino.h>
 #include "autoregulator.h" //specifies config
 #include "esp_sleep.h"
@@ -214,11 +221,13 @@ void setup() {
     
     #ifdef ENABLE_LOG
       logMsg.concat("Cold start.");
+      logMsg.concat(formatTOD(ref,1));
     #endif
 
     #ifdef SHOW_SERIAL
       delay(2000);
       Serial.println(F("Cold start."));
+      Serial.println(formatTOD(ref,1));
       Serial.println(F("Enter 'w' to stay awake."));
       Serial.println(F("Enter 's' to enter deep sleep."));
     #endif
@@ -278,10 +287,10 @@ void setup() {
         display.setFont(&FreeSans12pt7b);
         displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
         display.print("Current RTC time:");
+      display.print(formatTOD(ref,1));
 
         display.setFont(&FreeSansBold12pt7b);
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        displayPrintTime(tod.hour()*3600000 + tod.minute()*60000 + tod.second()*1000, 0);
 
         // display.setFont(&FreeSans12pt7b);
         // displayY += (6+12)*1.5; display.setCursor(0, displayY);
@@ -319,7 +328,7 @@ void setup() {
   #ifdef ENABLE_LOG
     logMsg.concat("Wake="); logMsg.concat(triggerCount);
     logMsg.concat(" Ref="); logMsg.concat(ref); 
-    //TODO displayPrintTime split string/char generation from display so you can use the string/char here
+    logMsg.concat(formatTOD(ref,1));
   #endif
   #ifdef ENABLE_EINK
     display.setTextColor(EPD_BLACK);
@@ -334,7 +343,7 @@ void setup() {
     displayY += (6+12)*1.5; display.setCursor(0, displayY);
     display.print("Time ");
     display.setFont(&FreeSansBold12pt7b);
-    displayPrintTime(ref,0); //TODO add decimals
+    display.print(formatTOD(ref,1));
   #endif
 
   if(triggerCount==1) {
@@ -850,43 +859,43 @@ long moveMotor(long motorChange) {
   #endif
 }
 
-void displayPrintTime(unsigned long tod, byte decPlaces) {
-  #ifdef ENABLE_EINK
-    display.print((tod/3600000)/10); //hour tens
-    display.print((tod/3600000)%10); //hour ones
-    display.print(":");
-    display.print(((tod/60000)%60)/10); //min tens
-    display.print(((tod/60000)%60)%10); //min ones
-    display.print(":");
-    display.print(((tod/1000)%60)/10); //sec tens
-    display.print(((tod/1000)%60)%10); //sec ones
-    if(decPlaces>0) {
-      display.print(".");
-      display.print((tod%1000)/100); //tenths
-      if(decPlaces>1) {
-        display.print((tod%100)/10); //hundredths
-        if(decPlaces>2) {
-          display.print((tod%10)); //hundredths
-        }
+String formatTOD(unsigned long tod, byte decPlaces) {
+  String todStr;
+  todStr.concat((tod/3600000)/10); //hour tens
+  todStr.concat((tod/3600000)%10); //hour ones
+  todStr.concat(":");
+  todStr.concat(((tod/60000)%60)/10); //min tens
+  todStr.concat(((tod/60000)%60)%10); //min ones
+  todStr.concat(":");
+  todStr.concat(((tod/1000)%60)/10); //sec tens
+  todStr.concat(((tod/1000)%60)%10); //sec ones
+  if(decPlaces>0) {
+    todStr.concat(".");
+    todStr.concat((tod%1000)/100); //tenths
+    if(decPlaces>1) {
+      todStr.concat((tod%100)/10); //hundredths
+      if(decPlaces>2) {
+        todStr.concat((tod%10)); //hundredths
       }
     }
-  #endif
+  }
+  return todStr;
 }
 
-void displayPrintSignedDecMils(long mils, byte decPlaces) {
-  #ifdef ENABLE_EINK
-    if(mils>=0) display.print("+");
-    else display.print("-");
-    display.print(abs(mils/1000));
-    if(decPlaces>0) {
-      display.print(".");
-      display.print(abs((mils%1000)/100)); //tenths
-      if(decPlaces>1) {
-        display.print(abs((mils%100)/10)); //hundredths
-        if(decPlaces>2) {
-          display.print(abs(mils%10)); //thousandths
-        }
+String formatMils(long mils, byte decPlaces) {
+  String numStr;
+  if(mils>=0) numStr.concat("+");
+  else numStr.concat("-");
+  numStr.concat(abs(mils/1000));
+  if(decPlaces>0) {
+    numStr.concat(".");
+    numStr.concat(abs((mils%1000)/100)); //tenths
+    if(decPlaces>1) {
+      numStr.concat(abs((mils%100)/10)); //hundredths
+      if(decPlaces>2) {
+        numStr.concat(abs(mils%10)); //thousandths
       }
     }
-  #endif
+  }
+  return numStr;
 }
