@@ -173,7 +173,7 @@ void setup() {
     display.begin(THINKINK_TRICOLOR);
     display.setRotation(EINK_ROTATION);
     display.clearBuffer();
-    //the display contents will be built up procedurally as we go, like console output
+    //the display contents will be built up procedurally as we go, like serial output
   #endif
 
   motorCur = MOTOR_MAX/2; //assume it's somewhere in the middle, until it is autocalibrated
@@ -240,10 +240,15 @@ void setup() {
 
     #ifdef SHOW_SERIAL
       delay(2000);
-      Serial.println(F("Cold start."));
+      Serial.print(F("Cold start. Ref time is "));
       Serial.println(formatTOD(ref,1));
       Serial.println(F("Enter 'w' to stay awake."));
       Serial.println(F("Enter 's' to enter deep sleep."));
+      #ifdef ENABLE_DS3231
+        Serial.println("Enter 'c' to set real-time clock.");
+      #endif
+      Serial.println(F("Enter 'm' to arbitrarily move motor."));
+      Serial.println(F("Enter 'a' to autocalibrate motor."));
     #endif
   
     #ifdef BATTERY_MONITOR_PIN
@@ -253,29 +258,6 @@ void setup() {
     #ifdef ENABLE_NEOPIXEL
       pixels.fill(0x00FFFF); //teal to indicate cold start wait
       pixels.show();
-    #endif
-    
-    #ifdef SHOW_SERIAL
-      Serial.println(F("Enter 'm' to arbitrarily move motor."));
-      Serial.println(F("Enter 'a' to autocalibrate motor."));
-    #endif
-
-    #ifdef ENABLE_DS3231
-      String rtcTime;
-      if(tod.hour()<10) rtcTime.concat("0");
-      rtcTime.concat(tod.hour()); rtcTime.concat(":");
-      if(tod.minute()<10) rtcTime.concat("0");
-      rtcTime.concat(tod.minute()); rtcTime.concat(":");
-      if(tod.second()<10) rtcTime.concat("0");
-      rtcTime.concat(tod.second());
-      #ifdef SHOW_SERIAL
-        Serial.print("Current RTC time: ");
-        Serial.println(rtcTime);
-        Serial.println("Enter 'c' to set real-time clock.");
-      #endif
-      #ifdef ENABLE_LOG
-        logMsg.concat(" RTC="); logMsg.concat(rtcTime);
-      #endif
     #endif
 
     #ifdef ENABLE_EINK
@@ -295,21 +277,14 @@ void setup() {
 
       display.setFont(&FreeSans12pt7b);
       displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-      display.print("Awaiting trigger.");
-      
-      #ifdef ENABLE_DS3231
-        display.setFont(&FreeSans12pt7b);
-        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-        display.print("Current RTC time:");
+      display.print("Time ");
+      display.setFont(&FreeSansBold12pt7b);
       display.print(formatTOD(ref,1));
 
-        display.setFont(&FreeSansBold12pt7b);
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
+      display.setFont(&FreeSans12pt7b);
+      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+      display.print("Awaiting trigger.");
 
-        // display.setFont(&FreeSans12pt7b);
-        // displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        // display.print("Enter 'c' to set.");
-      #endif
       display.display();
     #endif
 
@@ -320,30 +295,14 @@ void setup() {
   //otherwise we woke from sleep, probably by ESP_SLEEP_WAKEUP_EXT0
   //in this part, the log string is written to both serial and wifi log
 
-  #ifdef SHOW_SERIAL
-    delay(2000);
-    //Serial.printf("Wake from sleep at %lu",millisStart);
-    Serial.println(F("Wake from sleep"));
-  #endif
   triggerCount++;
 
-  // ref = triggerCount*3600000; //debug
-
-  //Here is where the magic happens
-  //clock difference is nominal 60 minutes - TODO make this variable / multiples - probably need a periodLast/periodPrev or such
-  //Can the motor sense when it hits the end?
-
-  //Having got millis1 at startup:
-  // * Capture millis2
-  // * Grab ref
-  // * Capture millis3
-  // * ref -= (millis2-millis1)+((millis3-millis2)/2) - our best guess at ref time when interrupt occurred
-
   #ifdef ENABLE_LOG
-    logMsg.concat("Wake="); logMsg.concat(triggerCount);
-    logMsg.concat(" Ref="); logMsg.concat(ref); 
+    logMsg.concat("Wake=0");
+    logMsg.concat("&Ref=");
     logMsg.concat(formatTOD(ref,1));
   #endif
+
   #ifdef ENABLE_EINK
     display.setTextColor(EPD_BLACK);
     
@@ -363,7 +322,7 @@ void setup() {
   if(triggerCount==1) {
     //first wake - we have nothing
     #ifdef ENABLE_LOG
-      logMsg.concat(" At next wake, we'll know rate.");
+      logMsg.concat("&Msg=At next wake, we will know rate.");
     #endif
     #ifdef ENABLE_EINK
       display.setFont(&FreeSans12pt7b);
@@ -380,8 +339,7 @@ void setup() {
     if(period<0) period+=86400000; //midnight rollover
 
     //Once the clock is well-regulated, it may be many samples before the difference is appreciable,
-    //because of tolerances in the trigger (a few ticks early or late) and lack of resolution from RTC.
-    //TODO: get mils from RTC
+    //because of tolerances in the trigger (a few ticks early or late).
     //TODO: average the samples, even if they are at a delay?
 
     /*    
@@ -395,8 +353,8 @@ void setup() {
     1.6 hour: (5760000+(1800000))/3600000 = 2(.1)
     2.0 hour: (7200000+(1800000))/3600000 = 2(.5)
     */
-    int targetmf = (period+(PERIOD_MILS/2))/PERIOD_MILS;
-    long target = PERIOD_MILS*targetmf;
+    int targetx = (period+(PERIOD_MILS/2))/PERIOD_MILS;
+    long target = PERIOD_MILS*targetx;
     /*
     We also want to discard samples that are spurious, 
     so we discard if more than 1% out of target.
@@ -409,41 +367,36 @@ void setup() {
     119min  = 7140000/720 =  9916 = valid   ( 99.16% of 2 hours)
     118min  = 7080000/720 =  9833 = invalid ( 98.33% of 2 hours)
     */
-    int targetPct = period/(target/10000);
+    int accuracy = period/(target/10000);
 
     #ifdef ENABLE_LOG
-      logMsg.concat(" RefPrev="); logMsg.concat(refPrev);
-      logMsg.concat(" Period="); logMsg.concat(period); logMsg.concat(": ");
-      logMsg.concat(targetPct/100); logMsg.concat("."); //whole number
-      logMsg.concat((targetPct%100)/10); //tenths
-      logMsg.concat(targetPct%10); //hundredths
-      logMsg.concat("% of ");
-      logMsg.concat(targetmf);
-      logMsg.concat("x target (");
-      logMsg.concat(target);
-      logMsg.concat(").");
+      logMsg.concat("&RefPrev="); logMsg.concat(formatTOD(refPrev,1));
+      logMsg.concat("&Period="); logMsg.concat(period); // logMsg.concat(": ");
+      logMsg.concat("&Target="); logMsg.concat(target);
+      logMsg.concat("&TargetX="); logMsg.concat(targetx);
+      logMsg.concat("&Accuracy="); logMsg.concat(accuracy);
+      // logMsg.concat(accuracy/100); logMsg.concat("."); //whole number
+      // logMsg.concat((accuracy%100)/10); //tenths
+      // logMsg.concat(accuracy%10); //hundredths
     #endif
-    #ifdef ENABLE_EINK
-      //don't display refPrev
-      display.setFont(&FreeSans12pt7b);
-      displayY += (6+12)*1.5; display.setCursor(0, displayY);
-      display.print("Period ");
-      display.setFont(&FreeSansBold12pt7b);
-      display.print(targetPct/100,DEC);
-      display.print(F("."));
-      display.print((targetPct%100)/10); //tenths
-      display.print((targetPct%10)); //hundredths
-      display.print(F("% "));
-      display.print(targetmf,DEC);
-      display.print(F("x"));
-    #endif
+    // #ifdef ENABLE_EINK
+    //   //don't display refPrev
+    //   display.setFont(&FreeSans12pt7b);
+    //   displayY += (6+12)*1.5; display.setCursor(0, displayY);
+    //   display.print("Period ");
+    //   display.setFont(&FreeSansBold12pt7b);
+    //   display.print(accuracy/100,DEC);
+    //   display.print(F("."));
+    //   display.print((accuracy%100)/10); //tenths
+    //   display.print((accuracy%10)); //hundredths
+    //   display.print(F("% "));
+    //   display.print(targetx,DEC);
+    //   display.print(F("x"));
+    // #endif
 
-    if(targetPct<9900 || targetPct>10100) {
+    if(accuracy<9900 || accuracy>10100) {
       #ifdef ENABLE_LOG
-        logMsg.concat(" Out of range; ignoring.");
-      #endif
-      #ifdef SHOW_SERIAL
-        Serial.println(logMsg);
+        logMsg.concat("&Msg=Out of range; ignoring.");
       #endif
 
       #ifdef ENABLE_EINK
@@ -496,12 +449,12 @@ void setup() {
 
       adjReg = (rate<=0? MOTOR_STEPS: 0-MOTOR_STEPS);
       #ifdef ENABLE_LOG
-        logMsg.concat(" AdjRegTarget="); logMsg.concat(adjReg);
+        logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
       #endif
       adjReg = moveMotor(adjReg); //it may max out before that
       #ifdef ENABLE_LOG
-        logMsg.concat(" AdjRegActual="); logMsg.concat(adjReg);
-        logMsg.concat(" At next rate, we'll know change.");
+        logMsg.concat("&AdjRegActual="); logMsg.concat(adjReg);
+        logMsg.concat("&Msg=At next rate, we will know change.");
       #endif
 
       #ifdef ENABLE_EINK
@@ -541,7 +494,7 @@ void setup() {
         //   Serial.println(adjRateFactor,DEC);
         // #endif
         #ifdef ENABLE_LOG
-          logMsg.concat(" AdjFactor="); logMsg.concat(adjRateFactor);
+          logMsg.concat("&AdjFactor="); logMsg.concat(adjRateFactor);
         #endif
       }
 
@@ -578,11 +531,11 @@ void setup() {
       //we finally do the magic - apply a regulation adj that is opposite of current rate
       adjReg = MOTOR_STEPS*((0-rate)/adjRateFactor);
       #ifdef ENABLE_LOG
-        logMsg.concat(" AdjRegTarget="); logMsg.concat(adjReg);
+        logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
       #endif
       adjReg = moveMotor(adjReg); //it may max out before that
       #ifdef ENABLE_LOG
-        logMsg.concat(" AdjRegActual="); logMsg.concat(adjReg);
+        logMsg.concat("&AdjRegActual="); logMsg.concat(adjReg);
       #endif
 
       #ifdef ENABLE_EINK
@@ -666,12 +619,13 @@ void loop() {
         if(readString=="m") inputStage=10; //enter motor setting
         if(readString=="a") inputStage=20;
         if(readString=="s") {
-          logMsg.concat(F(" Commanded to sleep."));
+          logMsg.concat("&Msg=Commanded to sleep.");
           finish(logMsg);
         }
 
         //set RTC clock and move motor
         int incomingInt = readString.toInt();
+        DateTime tod;
         switch(inputStage) {
 
           case 1: //w - keep it from sleeping
@@ -723,6 +677,7 @@ void loop() {
               if(tod.second()<10) display.print("0");
               display.print(tod.second());
               display.display();
+              //TODOTODO
             #endif
 
             inputStage=99;
@@ -770,65 +725,69 @@ void loop() {
   #endif
 
   if(inputStage==0 && (millis()-millisStart>COLD_BOOT_SLEEP_PERIOD)) {
-    logMsg.concat(" Setup timed out.");
+    logMsg.concat("&Msg=Sleep naturally.");
     finish(logMsg);
   }
 
 }
 
 void finish(String logMsg) {
-  //Write to online database
-  if(WiFi.status()==WL_CONNECTED){
-    HTTPClient http;
-    int httpReturnCode;
-    for(int attempts=0; attempts<3; attempts++) {
-      #ifdef SHOW_SERIAL
-        Serial.print(F("Sending to log, attempt "));
-        Serial.println(attempts,DEC);
-      #endif
-      unsigned long offset = millis()-millisStart;
-      http.begin(String(LOG_URL));
-      // http.addHeader("Content-Type", "Content-Type: application/json"); //TODO? https://stackoverflow.com/a/60343909
-      // http.begin(String(LOG_URL)+"&offset="+String(offset));
-      Serial.print("The log is: ");
-      Serial.println(logMsg);
-      httpReturnCode = http.POST(logMsg);
-      if(httpReturnCode==200) {
+  #ifdef SHOW_SERIAL
+    Serial.println(logMsg);
+  #endif
+  #ifdef ENABLE_WIFI
+    //Write to online database
+    if(WiFi.status()==WL_CONNECTED){
+      HTTPClient http;
+      int httpReturnCode;
+      for(int attempts=0; attempts<3; attempts++) {
         #ifdef SHOW_SERIAL
-          Serial.println(F("Successful!"));
+          Serial.print(F("Sending to log, attempt "));
+          Serial.println(attempts,DEC);
+        #endif
+        unsigned long offset = millis()-millisStart;
+        // http.begin(String(LOG_URL)+"&offset="+String(offset));
+        http.begin(String(LOG_URL));
+        // http.addHeader("Content-Type", "Content-Type: application/json"); //TODO? https://stackoverflow.com/a/60343909
+        http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+        httpReturnCode = http.POST(logMsg);
+        if(httpReturnCode==200) {
+          #ifdef SHOW_SERIAL
+            Serial.println(F("Successful!"));
+          #endif
+          #ifdef ENABLE_NEOPIXEL
+            pixels.fill(0x00FF00); //green - log success
+            pixels.show();
+            delay(1000);
+          #endif
+          break; //leave attempts loop
+        }
+      }
+      if(httpReturnCode!=200) {
+        #ifdef SHOW_SERIAL
+          Serial.print(F("Not successful. Last HTTP code: "));
+          Serial.println(httpReturnCode,DEC);
         #endif
         #ifdef ENABLE_NEOPIXEL
-          pixels.fill(0x00FF00); //green - log success
+          pixels.fill(0xFF0000); //red - log failure
           pixels.show();
           delay(1000);
         #endif
-        break; //leave attempts loop
+        #ifdef ENABLE_EINK
+          display.setTextColor(EPD_RED);
+          display.setFont(&FreeSans12pt7b);
+          displayY += (12)*1.5; display.setCursor(0, displayY);
+          display.print("Logging failed.");
+        #endif
       }
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
     }
-    if(httpReturnCode!=200) {
-      #ifdef SHOW_SERIAL
-        Serial.print(F("Not successful. Last HTTP code: "));
-        Serial.println(httpReturnCode,DEC);
-      #endif
-      #ifdef ENABLE_NEOPIXEL
-        pixels.fill(0xFF0000); //red - log failure
-        pixels.show();
-        delay(1000);
-      #endif
-      #ifdef ENABLE_EINK
-        display.setTextColor(EPD_RED);
-        display.setFont(&FreeSans12pt7b);
-        displayY += (12)*1.5; display.setCursor(0, displayY);
-        display.print("Logging failed.");
-      #endif
-    }
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-  }
-  //Go to sleep
+  #endif
   #ifdef SHOW_SERIAL
     Serial.flush();
   #endif
+  //Go to sleep
   esp_deep_sleep_start();
 }
 
