@@ -231,10 +231,13 @@ void setup() {
   #endif
 
   //Who disturbs my slumber??
-  if(esp_sleep_get_wakeup_cause()==ESP_SLEEP_WAKEUP_UNDEFINED) { //Cold start
+  if(esp_sleep_get_wakeup_cause()!=ESP_SLEEP_WAKEUP_EXT0) { //Cold start
+    //Does this make a difference vs. ==ESP_SLEEP_WAKEUP_UNDEFINED ?
+    //TODO could also just be based on triggerCount=0
     
     #ifdef ENABLE_LOG
-      logMsg.concat("Cold start.");
+      logMsg.concat("Wake=0");
+      logMsg.concat("&Ref=");
       logMsg.concat(formatTOD(ref,1));
     #endif
 
