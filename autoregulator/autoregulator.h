@@ -7,9 +7,10 @@
 //Declarations
 void setup();
 void loop();
-void goToSleep();
+void finish(String logMsg);
 long moveMotor(long motorChange);
 void resetMotor();
-void displayPrintTime(unsigned long tod, byte milPlaces);
+String formatTOD(unsigned long tod, byte decPlaces);
+String formatMils(long mils, byte decPlaces);
 
 #endif //AUTOREGULATOR_H

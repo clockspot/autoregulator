@@ -2,17 +2,17 @@
 // https://github.com/clockspot/autoregulator
 // Sketch by Luke McKenzie (luke@theclockspot.com)
 
+// TODO why does it wake up so erratically
+// TODO From wake 0 to 1, should still be able to calculate period vs target - TODO actually must document that wake 1 must occur correctly, neither skipped nor spurious
+// TODO at startup, move off stop, so that test move is always effective; don't monitor position, and just detect when change was less than effective
+// TODO Period to Per.
+// TODO get temp from DS3231
+// TODO get decimal from DS3231
+
 #include <arduino.h>
 #include "autoregulator.h" //specifies config
 #include "esp_sleep.h"
 
-
-//TODO which of these are needed for NTP sync
-// #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson needs version v6 or above
-
-// #include <WiFi.h>
-// #include <WiFiClientSecure.h>
-// #include <HTTPClient.h> // Needs to be from the ESP32 platform version 3.2.0 or later, as the previous has problems with http-redirect
 
 #ifdef ENABLE_NEOPIXEL
   #include <Adafruit_NeoPixel.h>
@@ -45,7 +45,26 @@
   // RTClib rtc; //an object to access a snapshot of the ds3231 via rtc.now()
   #include <RTClib.h>
   RTC_DS3231 rtc;
-  DateTime tod;
+#endif
+
+#ifdef ENABLE_WIFI
+  #include <WiFi.h>
+  //TODO which of these are needed for NTP sync
+  // #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson needs version v6 or above
+  // #include <WiFiClientSecure.h>
+  #include <HTTPClient.h> // Needs to be from the ESP32 platform version 3.2.0 or later, as the previous has problems with http-redirect
+  #define ENABLE_LOG
+#endif
+
+#ifdef SHOW_SERIAL
+  #ifndef ENABLE_LOG
+    #define ENABLE_LOG
+  #endif
+#endif
+
+#ifdef ENABLE_LOG
+  String logMsg;
+  //TODO replace with char arrays?
 #endif
 
 unsigned long millisStart;
@@ -131,13 +150,30 @@ void setup() {
   #ifdef ENABLE_DS3231
     // Wire.begin();
     rtc.begin();
-    tod = rtc.now();
-    ref = (tod.hour()*3600000)+(tod.minute()*60000)+(tod.second()*1000); //TODO offset
+    //Time to work out what RTC was at boot, to millisecond precision. Example:
+    //We booted when RTC sec was 25.6; we captured millis() at that time.
+    //When we get here, RTC sec reads 28 (actual 28.3); millis since boot is 2700 (28.3-25.6=2.7s)
+    //We keep checking RTC til second changes to 29; millis since boot is now 3400 (29.0-25.6=3.4s)
+    //So we can now take that RTC time and subtract the millis since boot to get RTC sec = 25.6.
+    DateTime todA;
+    DateTime todB;
+    todA = rtc.now();
+    while(1) { //Take up to one second to detect RTC second change
+      todB = rtc.now();
+      if(todA.second()!=todB.second()) break;
+    }
+    //Start with negative millis since boot (assuming that gets evaluated first)
+    //and add millis for each of the time of day components as of the last RTC sample
+    ref = 0-(millis()-millisStart)+(todB.hour()*3600000)+(todB.minute()*60000)+(todB.second()*1000);
   #endif
+  //TODO else if no DS3231, get time from wifi
+  //in that case ref should be something like (millis2-millis1)+((millis3-millis2)/2), where the "rtc" is halfway between when we started the request and when we got it back
 
   #ifdef ENABLE_EINK
     display.begin(THINKINK_TRICOLOR);
     display.setRotation(EINK_ROTATION);
+    display.clearBuffer();
+    //the display contents will be built up procedurally as we go, like serial output
   #endif
 
   motorCur = MOTOR_MAX/2; //assume it's somewhere in the middle, until it is autocalibrated
@@ -146,14 +182,76 @@ void setup() {
     stepper.setSpeed(60);
   #endif
 
+  #ifdef ENABLE_WIFI
+    //Start wifi
+    WiFi.mode(WIFI_STA);
+    for(int attempts=0; attempts<3; attempts++) {
+      #ifdef SHOW_SERIAL
+        Serial.print(F("Connecting to WiFi SSID "));
+        Serial.println(WIFI_SSID);
+      #endif
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      int timeout = 0;
+      while(WiFi.status()!=WL_CONNECTED && timeout<15) {
+        timeout++; delay(1000);
+      }
+      if(WiFi.status()==WL_CONNECTED){ //did it work?
+        #ifdef ENABLE_NEOPIXEL
+          pixels.fill(0x0000FF); //blue - wifi success
+          pixels.show();
+        #endif
+        #ifdef SHOW_SERIAL
+          Serial.println(F("Connected!"));
+          //Serial.print(F("SSID: ")); Serial.println(WiFi.SSID());
+          Serial.print(F("Signal strength (RSSI): ")); Serial.print(WiFi.RSSI()); Serial.println(F(" dBm"));
+          Serial.print(F("Local IP: ")); Serial.println(WiFi.localIP());
+        #endif
+        //don't display anything on the e-ink
+        break; //leave attempts loop
+      }
+    }
+    if(WiFi.status()!=WL_CONNECTED) {
+      #ifdef SHOW_SERIAL
+        Serial.println(F("Wasn't able to connect."));
+      #endif
+      #ifdef ENABLE_NEOPIXEL
+        pixels.fill(0xFF0000); //red - no wifi success
+        pixels.show();
+        delay(1000);
+      #endif
+      #ifdef ENABLE_EINK
+        display.setTextColor(EPD_RED);
+        display.setFont(&FreeSans12pt7b);
+        displayY += (12)*1.5; display.setCursor(0, displayY);
+        display.print("WiFi failed.");
+      #endif
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+    }
+  #endif
+
   //Who disturbs my slumber??
-  if(esp_sleep_get_wakeup_cause()==ESP_SLEEP_WAKEUP_UNDEFINED) { //Cold start
+  if(esp_sleep_get_wakeup_cause()!=ESP_SLEEP_WAKEUP_EXT0) { //Cold start
+    //Does this make a difference vs. ==ESP_SLEEP_WAKEUP_UNDEFINED ?
+    //TODO could also just be based on triggerCount=0
     
+    #ifdef ENABLE_LOG
+      logMsg.concat("Wake=0");
+      logMsg.concat("&Ref=");
+      logMsg.concat(formatTOD(ref,1));
+    #endif
+
     #ifdef SHOW_SERIAL
       delay(2000);
-      Serial.println(F("Cold start."));
+      Serial.print(F("Cold start. Ref time is "));
+      Serial.println(formatTOD(ref,1));
       Serial.println(F("Enter 'w' to stay awake."));
       Serial.println(F("Enter 's' to enter deep sleep."));
+      #ifdef ENABLE_DS3231
+        Serial.println("Enter 'c' to set real-time clock.");
+      #endif
+      Serial.println(F("Enter 'm' to arbitrarily move motor."));
+      Serial.println(F("Enter 'a' to autocalibrate motor."));
     #endif
   
     #ifdef BATTERY_MONITOR_PIN
@@ -164,33 +262,10 @@ void setup() {
       pixels.fill(0x00FFFF); //teal to indicate cold start wait
       pixels.show();
     #endif
-    
-    #ifdef SHOW_SERIAL
-      Serial.println(F("Enter 'm' to arbitrarily move motor."));
-      Serial.println(F("Enter 'a' to autocalibrate motor."));
-    #endif
-
-    #ifdef ENABLE_DS3231
-      #ifdef SHOW_SERIAL
-        Serial.print("Current RTC time: ");
-        if(tod.hour()<10) Serial.print("0");
-        Serial.print(tod.hour(),DEC);
-        Serial.print(":");
-        if(tod.minute()<10) Serial.print("0");
-        Serial.print(tod.minute(),DEC);
-        Serial.print(":");
-        if(tod.second()<10) Serial.print("0");
-        Serial.println(tod.second(),DEC);
-        Serial.println("Enter 'c' to set real-time clock.");
-      #endif
-    #endif
 
     #ifdef ENABLE_EINK
-      displayY = 0; display.clearBuffer();
-      
       display.setTextColor(EPD_BLACK);
-      // display.setTextColor(EPD_RED);
-
+      
       display.setFont(&FreeSansBold12pt7b);
       displayY += (12)*1.5; display.setCursor(0, displayY);
       display.print("Autoregulator");
@@ -205,21 +280,14 @@ void setup() {
 
       display.setFont(&FreeSans12pt7b);
       displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+      display.print("Time ");
+      display.setFont(&FreeSansBold12pt7b);
+      display.print(formatTOD(ref,1));
+
+      display.setFont(&FreeSans12pt7b);
+      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
       display.print("Awaiting trigger.");
-      
-      #ifdef ENABLE_DS3231
-        display.setFont(&FreeSans12pt7b);
-        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-        display.print("Current RTC time:");
 
-        display.setFont(&FreeSansBold12pt7b);
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        displayPrintTime(tod.hour()*3600000 + tod.minute()*60000 + tod.second()*1000, 0);
-
-        // display.setFont(&FreeSans12pt7b);
-        // displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        // display.print("Enter 'c' to set.");
-      #endif
       display.display();
     #endif
 
@@ -228,113 +296,18 @@ void setup() {
   } //end cold start
 
   //otherwise we woke from sleep, probably by ESP_SLEEP_WAKEUP_EXT0
+  //in this part, the log string is written to both serial and wifi log
 
-  #ifdef SHOW_SERIAL
-    delay(2000);
-    //Serial.printf("Wake from sleep at %lu",millisStart);
-    Serial.println(F("Wake from sleep"));
-  #endif
   triggerCount++;
 
-  // ref = triggerCount*3600000; //debug
-
-  // //Start wifi
-  // for(int attempts=0; attempts<3; attempts++) {
-  //   #ifdef SHOW_SERIAL
-  //     Serial.print(F("\nConnecting to WiFi SSID "));
-  //     Serial.println(NETWORK_SSID);
-  //   #endif
-  //   WiFi.begin(NETWORK_SSID, NETWORK_PASS);
-  //   int timeout = 0;
-  //   while(WiFi.status()!=WL_CONNECTED && timeout<15) {
-  //     timeout++; delay(1000);
-  //   }
-  //   if(WiFi.status()==WL_CONNECTED){ //did it work?
-  //     #ifdef ENABLE_NEOPIXEL
-  //       pixels.fill(0x0000FF); //blue - wifi success
-  //       pixels.show();
-  //     #endif
-  //     #ifdef SHOW_SERIAL
-  //       Serial.println(F("Connected!"));
-  //       //Serial.print(F("SSID: ")); Serial.println(WiFi.SSID());
-  //       Serial.print(F("Signal strength (RSSI): ")); Serial.print(WiFi.RSSI()); Serial.println(F(" dBm"));
-  //       Serial.print(F("Local IP: ")); Serial.println(WiFi.localIP());
-  //     #endif
-  //     break; //leave attempts loop
-  //   }
-  // }
-  // if(WiFi.status()!=WL_CONNECTED) {
-  //   #ifdef SHOW_SERIAL
-  //     Serial.println(F("Wasn't able to connect."));
-  //   #endif
-  //   #ifdef ENABLE_NEOPIXEL
-  //     pixels.fill(0xFF0000); //red - no wifi success
-  //     pixels.show();
-  //     delay(1000);
-  //   #endif
-
-  //   WiFi.disconnect(true);
-  //   WiFi.mode(WIFI_OFF);
-  //   return;
-  // }
-
-  // //If we reach this point, wifi is OK
-  // HTTPClient http;
-  // int httpReturnCode;
-  // for(int attempts=0; attempts<3; attempts++) {
-  //   #ifdef SHOW_SERIAL
-  //     Serial.print(F("\nSending to log, attempt "));
-  //     Serial.println(attempts,DEC);
-  //   #endif
-  //   unsigned long offset = millis()-millisStart;
-  //   http.begin(String(LOG_URL)+"&offset="+String(offset));
-  //   httpReturnCode = http.GET();
-  //   if(httpReturnCode==200) {
-  //     #ifdef SHOW_SERIAL
-  //       Serial.println(F("Successful!"));
-  //     #endif
-  //     #ifdef ENABLE_NEOPIXEL
-  //       pixels.fill(0x00FF00); //green - log success
-  //       pixels.show();
-  //       delay(1000);
-  //     #endif
-  //     break; //leave attempts loop
-  //   }
-  // }
-  // if(httpReturnCode!=200) {
-  //   #ifdef SHOW_SERIAL
-  //     Serial.print(F("Not successful. Last HTTP code: "));
-  //     Serial.println(httpReturnCode,DEC);
-  //   #endif
-  //   #ifdef ENABLE_NEOPIXEL
-  //     pixels.fill(0xFF0000); //red - log failure
-  //     pixels.show();
-  //     delay(1000);
-  //   #endif
-  // }
-
-  // WiFi.disconnect(true);
-  // WiFi.mode(WIFI_OFF);
-
-  //Here is where the magic happens
-  //clock difference is nominal 60 minutes - TODO make this variable / multiples - probably need a periodLast/periodPrev or such
-  //Can the motor sense when it hits the end?
-
-  //Having got millis1 at startup:
-  // * Capture millis2
-  // * Grab ref
-  // * Capture millis3
-  // * ref -= (millis2-millis1)+((millis3-millis2)/2) - our best guess at ref time when interrupt occurred
-
-  #ifdef SHOW_SERIAL
-    Serial.print(F("Wake ")); Serial.println(triggerCount,DEC);
-    Serial.print(F("Time ")); Serial.println(ref,DEC); //millis per day
+  #ifdef ENABLE_LOG
+    logMsg.concat("Wake=0");
+    logMsg.concat("&Ref=");
+    logMsg.concat(formatTOD(ref,1));
   #endif
 
   #ifdef ENABLE_EINK
     display.setTextColor(EPD_BLACK);
-
-    displayY = 0; display.clearBuffer();
     
     display.setFont(&FreeSans12pt7b);
     displayY += (12)*1.5; display.setCursor(0, displayY);
@@ -346,13 +319,13 @@ void setup() {
     displayY += (6+12)*1.5; display.setCursor(0, displayY);
     display.print("Time ");
     display.setFont(&FreeSansBold12pt7b);
-    displayPrintTime(ref,0); //TODO add decimals
+    display.print(formatTOD(ref,1));
   #endif
 
   if(triggerCount==1) {
     //first wake - we have nothing
-    #ifdef SHOW_SERIAL
-      Serial.println(F("At next wake, we'll know rate."));
+    #ifdef ENABLE_LOG
+      logMsg.concat("&Msg=At next wake, we will know rate.");
     #endif
     #ifdef ENABLE_EINK
       display.setFont(&FreeSans12pt7b);
@@ -362,25 +335,73 @@ void setup() {
       displayY += (6+12)*1.5; display.setCursor(0, displayY);
       display.print("we'll know rate.");
     #endif
+
   } else {
     //second+ wake - we have refPrev and can calculate rate
-    #ifdef SHOW_SERIAL
-      Serial.print(F("ref: ")); Serial.println(ref,DEC);
-      Serial.print(F("refPrev: ")); Serial.println(refPrev,DEC);
-    #endif
     long period = ref - refPrev; //should be ~3600000
-    #ifdef SHOW_SERIAL
-      Serial.print(F("period: ")); Serial.println(period,DEC);
+    if(period<0) period+=86400000; //midnight rollover
+
+    //Once the clock is well-regulated, it may be many samples before the difference is appreciable,
+    //because of tolerances in the trigger (a few ticks early or late).
+    //TODO: average the samples, even if they are at a delay?
+
+    /*    
+    We want to tolerate missed real samples, so we add a multiplication factor to the target.
+    multiplication factor = (period+(target/2))/target
+    the +(target/2) turns the decimal truncation into a rounding
+    Examples:
+    one hour: (3600000+(1800000))/3600000 = 1(.5)
+    1.1 hour: (3960000+(1800000))/3600000 = 1(.6)
+    1.5 hour: (5400000+(1800000))/3600000 = 2
+    1.6 hour: (5760000+(1800000))/3600000 = 2(.1)
+    2.0 hour: (7200000+(1800000))/3600000 = 2(.5)
+    */
+    int targetx = (period+(PERIOD_MILS/2))/PERIOD_MILS;
+    long target = PERIOD_MILS*targetx;
+    /*
+    We also want to discard samples that are spurious, 
+    so we discard if more than 1% out of target.
+    To calculate percentage to 4 places, we divide period by (target/10000)
+    Examples:
+    60min   = 3600000/360 = 10000 = valid   (100.00% of 1 hour)
+    59.5min = 3570000/360 =  9916 = valid   ( 99.16% of 1 hour)
+    59min   = 3540000/360 =  9830 = invalid ( 98.33% of 1 hour)
+    120min  = 7200000/720 = 10000 = valid   (100.00% of 2 hours)
+    119min  = 7140000/720 =  9916 = valid   ( 99.16% of 2 hours)
+    118min  = 7080000/720 =  9833 = invalid ( 98.33% of 2 hours)
+    */
+    int accuracy = period/(target/10000);
+
+    #ifdef ENABLE_LOG
+      logMsg.concat("&RefPrev="); logMsg.concat(formatTOD(refPrev,1));
+      logMsg.concat("&Period="); logMsg.concat(period); // logMsg.concat(": ");
+      logMsg.concat("&Target="); logMsg.concat(target);
+      logMsg.concat("&TargetX="); logMsg.concat(targetx);
+      logMsg.concat("&Accuracy="); logMsg.concat(accuracy);
+      // logMsg.concat(accuracy/100); logMsg.concat("."); //whole number
+      // logMsg.concat((accuracy%100)/10); //tenths
+      // logMsg.concat(accuracy%10); //hundredths
     #endif
-    long target = PERIOD_MILS;
-    #ifdef SHOW_SERIAL
-      Serial.print(F("target: ")); Serial.println(target,DEC);
-    #endif
-    if((period*20)>(target*21) || (period*20)<(target*19)) {
-      //Discard if more than 5% out (roughly)
-      #ifdef SHOW_SERIAL
-        Serial.println(F("Period is out of range, discarding"));
+    // #ifdef ENABLE_EINK
+    //   //don't display refPrev
+    //   display.setFont(&FreeSans12pt7b);
+    //   displayY += (6+12)*1.5; display.setCursor(0, displayY);
+    //   display.print("Period ");
+    //   display.setFont(&FreeSansBold12pt7b);
+    //   display.print(accuracy/100,DEC);
+    //   display.print(F("."));
+    //   display.print((accuracy%100)/10); //tenths
+    //   display.print((accuracy%10)); //hundredths
+    //   display.print(F("% "));
+    //   display.print(targetx,DEC);
+    //   display.print(F("x"));
+    // #endif
+
+    if(accuracy<9900 || accuracy>10100) {
+      #ifdef ENABLE_LOG
+        logMsg.concat("&Msg=Out of range; ignoring.");
       #endif
+
       #ifdef ENABLE_EINK
         display.setFont(&FreeSans12pt7b);
         displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
@@ -388,32 +409,22 @@ void setup() {
 
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
         display.print("Ignoring trigger.");
-      #endif
-      display.display();
-      goToSleep();
-    }
-    //TODO estimate correct period to account for gaps
-    //TODO start over if period is outside 1%?
-      //TODO does this happen only for later triggers?
-    //TODO remove the adjoffset
-    if(period<0) period+=86400000; //midnight rollover
-    #ifdef SHOW_SERIAL
-      Serial.print(F("period after midnight check: ")); Serial.println(period,DEC);
-    #endif
 
-    long long targetSq = (long long)target * target; // Promote to 64-bit (thanks Copilot!)
-    #ifdef SHOW_SERIAL
-      Serial.print(F("targetSq: ")); Serial.println(targetSq,DEC);
-      Serial.print(F("targetSq/period: ")); Serial.println(targetSq/period,DEC);
-      Serial.print(F("(0-target)+(targetSq/period): "));// Serial.println((0-target)+(targetSq/period),DEC);
-    #endif
-    long rate = (0-target)+(targetSq/period);
-    #ifdef SHOW_SERIAL
-      Serial.print(F("aka rate: ")); Serial.println(rate,DEC);
-    #endif
+        display.display();
+      #endif
+
+      finish(logMsg);
+    }
+
+    //TODO remove the adjoffset
+
+    //Calculate rate.
+    //Rate should be per hour, so we grow or shrink period to be relative to a target of 3600000.
+
     //Examples:
+    //Target is 60 minutes (3600000 ms)
     //Period is 72 minutes (4320000 ms)
-    //0-(3600000-((3600000^2)/4320000)
+    //0-(3600000-((3600000^2)/ 4320000 ))
     //Rate is -600000 ms/h (-10 min/hr)
 
     //Period is 62 minutes (3720000 ms)
@@ -424,6 +435,18 @@ void setup() {
     //Rate is +189473 ms/h (+3.15 min/hr)
     //a bit more than 3 mins, since the clock hour hits first
 
+    //Target is 120 minutes (7200000 ms)
+    //Period is 119 minutes (7140000 ms)
+    //0-(3600000-((3600000^2)/ (7140000/(7200000/3600000)) ))
+    //Rate is +30252 ms/h (+0.50 sec/hr)
+
+    long periodPerHour = ((long long)period * 3600000)/target;
+
+    long rate = 0-3600000+(12960000000000/periodPerHour);
+    #ifdef ENABLE_LOG
+      logMsg.concat("&Rate="); logMsg.concat(rate);
+    #endif
+
     long adjReg = 0;
 
     if(triggerCount==2) {
@@ -431,12 +454,13 @@ void setup() {
       //Make arbitrary adjustment
 
       adjReg = (rate<=0? MOTOR_STEPS: 0-MOTOR_STEPS);
-      #ifdef SHOW_SERIAL
-        Serial.print(F("adjReg target: ")); Serial.println(adjReg,DEC);
+      #ifdef ENABLE_LOG
+        logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
       #endif
       adjReg = moveMotor(adjReg); //it may max out before that
-      #ifdef SHOW_SERIAL
-        Serial.print(F("adjReg actual: ")); Serial.println(adjReg,DEC);
+      #ifdef ENABLE_LOG
+        logMsg.concat("&AdjRegActual="); logMsg.concat(adjReg);
+        logMsg.concat("&Msg=At next rate, we will know change.");
       #endif
 
       #ifdef ENABLE_EINK
@@ -444,7 +468,7 @@ void setup() {
         display.setFont(&FreeSans12pt7b);
         display.print("Rate ");
         display.setFont(&FreeSansBold12pt7b);
-        displayPrintSignedDecMils(rate,2);
+        display.print(formatMils(rate,2));
 
         displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
         display.setFont(&FreeSans12pt7b);
@@ -470,10 +494,13 @@ void setup() {
       //TODO at first we'll set only one adjRateFactor, but we should move to averaging it
       if(triggerCount==3) {
         //This will set adjRateFactor to a positive value, expanded to if adjPrev was MOTOR_STEPS (it may have been less)
-        adjRateFactor = rateChg * (MOTOR_STEPS/adjRegPrev);
-        #ifdef SHOW_SERIAL
-          Serial.print("Adj factor: ");
-          Serial.println(adjRateFactor,DEC);
+        adjRateFactor = abs(rateChg * (MOTOR_STEPS/adjRegPrev));
+        // #ifdef SHOW_SERIAL
+        //   Serial.print("Adj factor: ");
+        //   Serial.println(adjRateFactor,DEC);
+        // #endif
+        #ifdef ENABLE_LOG
+          logMsg.concat("&AdjFactor="); logMsg.concat(adjRateFactor);
         #endif
       }
 
@@ -482,7 +509,7 @@ void setup() {
         // displayY += (6+12)*1.5; display.setCursor(0, displayY);
         // display.print("Rate' ");
         // display.setFont(&FreeSansBold12pt7b);
-        // displayPrintSignedDecMils(ratePrev,2);
+        // display.print(formatMils(ratePrev,2));
         
         display.setFont(&FreeSans12pt7b);
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
@@ -494,13 +521,13 @@ void setup() {
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
         display.print("Rate ");
         display.setFont(&FreeSansBold12pt7b);
-        displayPrintSignedDecMils(rate,2);
+        display.print(formatMils(rate,2));
 
         display.setFont(&FreeSans12pt7b);
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
         display.print("Chg ");
         display.setFont(&FreeSansBold12pt7b);
-        displayPrintSignedDecMils(rateChg,2);
+        display.print(formatMils(rateChg,2));
       #endif
 
       
@@ -508,27 +535,29 @@ void setup() {
       //If there is an adjOffset, reverse it TODO
 
       //we finally do the magic - apply a regulation adj that is opposite of current rate
-      adjReg = (0-rate)*adjRateFactor;
-      #ifdef SHOW_SERIAL
-        Serial.print(F("adjReg target: ")); Serial.println(adjReg,DEC);
+      adjReg = MOTOR_STEPS*((0-rate)/adjRateFactor);
+      #ifdef ENABLE_LOG
+        logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
       #endif
       adjReg = moveMotor(adjReg); //it may max out before that
-      #ifdef SHOW_SERIAL
-        Serial.print(F("adjReg actual: ")); Serial.println(adjReg,DEC);
+      #ifdef ENABLE_LOG
+        logMsg.concat("&AdjRegActual="); logMsg.concat(adjReg);
       #endif
 
-      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-      display.setFont(&FreeSans12pt7b);
-      display.print("Adj ");
-      display.setFont(&FreeSansBold12pt7b);
-      if(adjReg>=0) display.print("+"); display.print(adjReg);
+      #ifdef ENABLE_EINK
+        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+        display.setFont(&FreeSans12pt7b);
+        display.print("Adj ");
+        display.setFont(&FreeSansBold12pt7b);
+        if(adjReg>=0) display.print("+"); display.print(adjReg);
 
-      display.setFont(&FreeSans9pt7b);
-      display.print(" (");
-      displayPrintSignedDecMils(adjRateFactor,2);
-      display.print(")");
+        display.setFont(&FreeSans9pt7b);
+        display.print(" (");
+        display.print(formatMils(adjRateFactor,2));
+        display.print(")");
+      #endif
 
-      //TODO display targeted time at correction
+      //TODO display targeted time at correction?
 
     } //end third+ wake
 
@@ -538,6 +567,10 @@ void setup() {
   } //end second+ wake
 
   refPrev = ref;
+
+  #ifdef SHOW_SERIAL
+    Serial.println(logMsg);
+  #endif
 
   display.display();
 
@@ -564,12 +597,8 @@ void setup() {
       * The rest is the same except last adj is an average of the last three rfs
   */
 
-  
-
-  
-
-  //Once setup is done, quiet down and go to sleep
-  goToSleep();
+  //Once setup is done, finish up
+  finish(logMsg);
     
 } //end setup()
 
@@ -595,10 +624,14 @@ void loop() {
         if(readString=="c") inputStage=2; //enter clock setting
         if(readString=="m") inputStage=10; //enter motor setting
         if(readString=="a") inputStage=20;
-        if(readString=="s") goToSleep();
+        if(readString=="s") {
+          logMsg.concat("&Msg=Commanded to sleep.");
+          finish(logMsg);
+        }
 
         //set RTC clock and move motor
         int incomingInt = readString.toInt();
+        DateTime tod;
         switch(inputStage) {
 
           case 1: //w - keep it from sleeping
@@ -635,7 +668,6 @@ void loop() {
             Serial.println();
 
             #ifdef ENABLE_EINK
-              displayY = 0; display.clearBuffer();
               display.setTextColor(EPD_BLACK);
               display.setFont(&FreeSans12pt7b);
               displayY += 12*1.5; display.setCursor(0, displayY);
@@ -651,6 +683,7 @@ void loop() {
               if(tod.second()<10) display.print("0");
               display.print(tod.second());
               display.display();
+              //TODOTODO
             #endif
 
             inputStage=99;
@@ -697,97 +730,151 @@ void loop() {
     #endif
   #endif
 
-  if(inputStage==0 && (millis()-millisStart>COLD_BOOT_SLEEP_PERIOD)) goToSleep();
+  if(inputStage==0 && (millis()-millisStart>COLD_BOOT_SLEEP_PERIOD)) {
+    logMsg.concat("&Msg=Sleep naturally.");
+    finish(logMsg);
+  }
 
 }
 
-void goToSleep() {
+void finish(String logMsg) {
+  #ifdef SHOW_SERIAL
+    Serial.println(logMsg);
+  #endif
+  #ifdef ENABLE_WIFI
+    //Write to online database
+    if(WiFi.status()==WL_CONNECTED){
+      HTTPClient http;
+      int httpReturnCode;
+      for(int attempts=0; attempts<3; attempts++) {
+        #ifdef SHOW_SERIAL
+          Serial.print(F("Sending to log, attempt "));
+          Serial.println(attempts,DEC);
+        #endif
+        unsigned long offset = millis()-millisStart;
+        // http.begin(String(LOG_URL)+"&offset="+String(offset));
+        http.begin(String(LOG_URL));
+        // http.addHeader("Content-Type", "Content-Type: application/json"); //TODO? https://stackoverflow.com/a/60343909
+        http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+        httpReturnCode = http.POST(logMsg);
+        if(httpReturnCode==200) {
+          #ifdef SHOW_SERIAL
+            Serial.println(F("Successful!"));
+          #endif
+          #ifdef ENABLE_NEOPIXEL
+            pixels.fill(0x00FF00); //green - log success
+            pixels.show();
+            delay(1000);
+          #endif
+          break; //leave attempts loop
+        }
+      }
+      if(httpReturnCode!=200) {
+        #ifdef SHOW_SERIAL
+          Serial.print(F("Not successful. Last HTTP code: "));
+          Serial.println(httpReturnCode,DEC);
+        #endif
+        #ifdef ENABLE_NEOPIXEL
+          pixels.fill(0xFF0000); //red - log failure
+          pixels.show();
+          delay(1000);
+        #endif
+        #ifdef ENABLE_EINK
+          display.setTextColor(EPD_RED);
+          display.setFont(&FreeSans12pt7b);
+          displayY += (12)*1.5; display.setCursor(0, displayY);
+          display.print("Logging failed.");
+        #endif
+      }
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+    }
+  #endif
   #ifdef SHOW_SERIAL
     Serial.flush();
   #endif
+  //Go to sleep
   esp_deep_sleep_start();
 }
 
 void resetMotor() {
-  //Based on fixed known range of regulator motor, it will send itself all the way down, stall a while, calibrate this as 0, then rise to center
-  inputStage=20;
-  #ifdef SHOW_SERIAL
-    Serial.print(F("Moving motor to "));
-    Serial.println(0-(MOTOR_MAX*1.02),DEC);
-  #endif
-  //Can't use moveMotor here bc it won't allow a negative movement
   #ifdef ENABLE_MOTOR
-    stepper.step(0-(MOTOR_MAX*1.02));
+    //Based on fixed known range of regulator motor, it will send itself all the way down, stall a while, calibrate this as 0, then rise to center
+    inputStage=20;
+    #ifdef SHOW_SERIAL
+      Serial.print(F("Moving motor to "));
+      Serial.println(0-((MOTOR_MAX*102)/100),DEC);
+    #endif
+    //Can't use moveMotor here bc it won't allow a negative movement
+    stepper.step(0-((MOTOR_MAX*102)/100));
+    motorCur = 0;
+    #ifdef SHOW_SERIAL
+      Serial.print(F("Zeroed. Now centering at "));
+      Serial.println(MOTOR_MAX/2,DEC);
+    #endif
+    moveMotor(MOTOR_MAX/2);
   #endif
-  motorCur = 0;
-  #ifdef SHOW_SERIAL
-    Serial.print(F("Zeroed. Now centering at "));
-    Serial.println(MOTOR_MAX/2,DEC);
-  #endif
-  moveMotor(MOTOR_MAX/2);
 }
 
 long moveMotor(long motorChange) {
-  //uses motorCur
-  if(motorChange>0) {
-    //don't move any further than MOTOR_MAX
-    //if we're at 95, and max is 100, we can't go more than 5
-    if(motorChange+motorCur > MOTOR_MAX) motorChange = MOTOR_MAX-motorCur;
-    #ifdef ENABLE_MOTOR
+  #ifdef ENABLE_MOTOR
+    //uses motorCur
+    if(motorChange>0) {
+      //don't move any further than MOTOR_MAX
+      //if we're at 95, and max is 100, we can't go more than 5
+      if(motorChange+motorCur > MOTOR_MAX) motorChange = MOTOR_MAX-motorCur;
       stepper.step(motorChange);
-    #endif
-    motorCur+=motorChange;
-    return motorChange;
-  } else if(motorChange<0) {
-    //don't move any further than 0 + MOTOR_NEG_OVERDRIVE
-    //if it's at 35, and overdrive is 20, we can't go more than -15, to leave room for the overdrive
-    if(motorCur+motorChange-MOTOR_NEG_OVERDRIVE < 0) motorChange = 0-motorCur;
-    #ifdef ENABLE_MOTOR
+      motorCur+=motorChange;
+      return motorChange;
+    } else if(motorChange<0) {
+      //don't move any further than 0 + MOTOR_NEG_OVERDRIVE
+      //if it's at 35, and overdrive is 20, we can't go more than -15, to leave room for the overdrive
+      if(motorCur+motorChange-MOTOR_NEG_OVERDRIVE < 0) motorChange = 0-motorCur;
       stepper.step(motorChange-MOTOR_NEG_OVERDRIVE); //overdrive sends it a little too far down...
       stepper.step(MOTOR_NEG_OVERDRIVE); //then back up, to ensure each adj ends on an up movement
-    #endif
-    motorCur+=motorChange; //negative
-    return motorChange;
-  } else return 0;
-}
-
-void displayPrintTime(unsigned long tod, byte decPlaces) {
-  #ifdef ENABLE_EINK
-    display.print((tod/3600000)/10); //hour tens
-    display.print((tod/3600000)%10); //hour ones
-    display.print(":");
-    display.print(((tod/60000)%60)/10); //min tens
-    display.print(((tod/60000)%60)%10); //min ones
-    display.print(":");
-    display.print(((tod/1000)%60)/10); //sec tens
-    display.print(((tod/1000)%60)%10); //sec ones
-    if(decPlaces>0) {
-      display.print(".");
-      display.print((tod%1000)/100); //tenths
-      if(decPlaces>1) {
-        display.print((tod%100)/10); //hundredths
-        if(decPlaces>2) {
-          display.print((tod%10)); //hundredths
-        }
-      }
-    }
+      motorCur+=motorChange; //negative
+      return motorChange;
+    } else return 0;
   #endif
 }
 
-void displayPrintSignedDecMils(long mils, byte decPlaces) {
-  #ifdef ENABLE_EINK
-    if(mils>=0) display.print("+");
-    else display.print("-");
-    display.print(abs(mils/1000));
-    if(decPlaces>0) {
-      display.print(".");
-      display.print(abs((mils%1000)/100)); //tenths
-      if(decPlaces>1) {
-        display.print(abs((mils%100)/10)); //hundredths
-        if(decPlaces>2) {
-          display.print(abs(mils%10)); //thousandths
-        }
+String formatTOD(unsigned long tod, byte decPlaces) {
+  String todStr;
+  todStr.concat((tod/3600000)/10); //hour tens
+  todStr.concat((tod/3600000)%10); //hour ones
+  todStr.concat(":");
+  todStr.concat(((tod/60000)%60)/10); //min tens
+  todStr.concat(((tod/60000)%60)%10); //min ones
+  todStr.concat(":");
+  todStr.concat(((tod/1000)%60)/10); //sec tens
+  todStr.concat(((tod/1000)%60)%10); //sec ones
+  if(decPlaces>0) {
+    todStr.concat(".");
+    todStr.concat((tod%1000)/100); //tenths
+    if(decPlaces>1) {
+      todStr.concat((tod%100)/10); //hundredths
+      if(decPlaces>2) {
+        todStr.concat((tod%10)); //hundredths
       }
     }
-  #endif
+  }
+  return todStr;
+}
+
+String formatMils(long mils, byte decPlaces) {
+  String numStr;
+  if(mils>=0) numStr.concat("+");
+  else numStr.concat("-");
+  numStr.concat(abs(mils/1000));
+  if(decPlaces>0) {
+    numStr.concat(".");
+    numStr.concat(abs((mils%1000)/100)); //tenths
+    if(decPlaces>1) {
+      numStr.concat(abs((mils%100)/10)); //hundredths
+      if(decPlaces>2) {
+        numStr.concat(abs(mils%10)); //thousandths
+      }
+    }
+  }
+  return numStr;
 }
