@@ -415,22 +415,13 @@ void setup() {
 
     //TODO remove the adjoffset
 
-    long long targetSq = (long long)target * target; // Promote to 64-bit (thanks Copilot!)
-    // #ifdef SHOW_SERIAL
-    //   Serial.print(F("targetSq: ")); Serial.println(targetSq,DEC);
-    //   Serial.print(F("targetSq/period: ")); Serial.println(targetSq/period,DEC);
-    //   Serial.print(F("(0-target)+(targetSq/period): "));// Serial.println((0-target)+(targetSq/period),DEC);
-    // #endif
-    long rate = (0-target)+(targetSq/period);
-    // #ifdef SHOW_SERIAL
-    //   Serial.print(F("aka rate: ")); Serial.println(rate,DEC);
-    // #endif
-    #ifdef ENABLE_LOG
-      logMsg.concat(" Rate="); logMsg.concat(rate);
-    #endif
+    //Calculate rate.
+    //Rate should be per hour, so we grow or shrink period to be relative to a target of 3600000.
+
     //Examples:
+    //Target is 60 minutes (3600000 ms)
     //Period is 72 minutes (4320000 ms)
-    //0-(3600000-((3600000^2)/4320000)
+    //0-(3600000-((3600000^2)/ 4320000 ))
     //Rate is -600000 ms/h (-10 min/hr)
 
     //Period is 62 minutes (3720000 ms)
@@ -440,6 +431,18 @@ void setup() {
     //Period is 57 minutes (3420000 ms)
     //Rate is +189473 ms/h (+3.15 min/hr)
     //a bit more than 3 mins, since the clock hour hits first
+
+    //Target is 120 minutes (7200000 ms)
+    //Period is 119 minutes (7140000 ms)
+    //0-(3600000-((3600000^2)/ (7140000/(7200000/3600000)) ))
+    //Rate is +30252 ms/h (+0.50 sec/hr)
+
+    long periodPerHour = ((long long)period * 3600000)/target;
+
+    long rate = 0-3600000+(12960000000000/periodPerHour);
+    #ifdef ENABLE_LOG
+      logMsg.concat("&Rate="); logMsg.concat(rate);
+    #endif
 
     long adjReg = 0;
 

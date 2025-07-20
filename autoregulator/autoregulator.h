@@ -11,5 +11,6 @@ void finish(String logMsg);
 long moveMotor(long motorChange);
 void resetMotor();
 String formatTOD(unsigned long tod, byte decPlaces);
+String formatMils(long mils, byte decPlaces);
 
 #endif //AUTOREGULATOR_H
