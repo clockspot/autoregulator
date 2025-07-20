@@ -45,7 +45,6 @@
   // RTClib rtc; //an object to access a snapshot of the ds3231 via rtc.now()
   #include <RTClib.h>
   RTC_DS3231 rtc;
-  DateTime tod;
 #endif
 
 #ifdef ENABLE_WIFI
@@ -151,9 +150,24 @@ void setup() {
   #ifdef ENABLE_DS3231
     // Wire.begin();
     rtc.begin();
-    tod = rtc.now();
-    ref = (tod.hour()*3600000)+(tod.minute()*60000)+(tod.second()*1000); //TODO offset
+    //Time to work out what RTC was at boot, to millisecond precision. Example:
+    //We booted when RTC sec was 25.6; we captured millis() at that time.
+    //When we get here, RTC sec reads 28 (actual 28.3); millis since boot is 2700 (28.3-25.6=2.7s)
+    //We keep checking RTC til second changes to 29; millis since boot is now 3400 (29.0-25.6=3.4s)
+    //So we can now take that RTC time and subtract the millis since boot to get RTC sec = 25.6.
+    DateTime todA;
+    DateTime todB;
+    todA = rtc.now();
+    while(1) { //Take up to one second to detect RTC second change
+      todB = rtc.now();
+      if(todA.second()!=todB.second()) break;
+    }
+    //Start with negative millis since boot (assuming that gets evaluated first)
+    //and add millis for each of the time of day components as of the last RTC sample
+    ref = 0-(millis()-millisStart)+(todB.hour()*3600000)+(todB.minute()*60000)+(todB.second()*1000);
   #endif
+  //TODO else if no DS3231, get time from wifi
+  //in that case ref should be something like (millis2-millis1)+((millis3-millis2)/2), where the "rtc" is halfway between when we started the request and when we got it back
 
   #ifdef ENABLE_EINK
     display.begin(THINKINK_TRICOLOR);
