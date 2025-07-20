@@ -509,7 +509,7 @@ void setup() {
         display.setFont(&FreeSans12pt7b);
         display.print("Rate ");
         display.setFont(&FreeSansBold12pt7b);
-        displayPrintSignedDecMils(rate,2);
+        display.print(formatMils(rate,2));
 
         displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
         display.setFont(&FreeSans12pt7b);
@@ -550,7 +550,7 @@ void setup() {
         // displayY += (6+12)*1.5; display.setCursor(0, displayY);
         // display.print("Rate' ");
         // display.setFont(&FreeSansBold12pt7b);
-        // displayPrintSignedDecMils(ratePrev,2);
+        // display.print(formatMils(ratePrev,2));
         
         display.setFont(&FreeSans12pt7b);
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
@@ -562,13 +562,13 @@ void setup() {
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
         display.print("Rate ");
         display.setFont(&FreeSansBold12pt7b);
-        displayPrintSignedDecMils(rate,2);
+        display.print(formatMils(rate,2));
 
         display.setFont(&FreeSans12pt7b);
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
         display.print("Chg ");
         display.setFont(&FreeSansBold12pt7b);
-        displayPrintSignedDecMils(rateChg,2);
+        display.print(formatMils(rateChg,2));
       #endif
 
       
@@ -594,7 +594,7 @@ void setup() {
 
         display.setFont(&FreeSans9pt7b);
         display.print(" (");
-        displayPrintSignedDecMils(adjRateFactor,2);
+        display.print(formatMils(adjRateFactor,2));
         display.print(")");
       #endif
 
