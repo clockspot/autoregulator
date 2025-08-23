@@ -165,6 +165,7 @@ void setup() {
     //Start with negative millis since boot (assuming that gets evaluated first)
     //and add millis for each of the time of day components as of the last RTC sample
     ref = 0-(millis()-millisStart)+(todB.hour()*3600000)+(todB.minute()*60000)+(todB.second()*1000);
+    if(ref>86399999) ref+=86400000; //just after midnight, when millis()-millisStart > time of day in millis, ref will be negative (rollover) and need to be fixed. Otherwise you get a ref like 4294966293 1193:02:46.2 (per uint32_t rollover after 4294967295).
   #endif
   //TODO else if no DS3231, get time from wifi
   //in that case ref should be something like (millis2-millis1)+((millis3-millis2)/2), where the "rtc" is halfway between when we started the request and when we got it back
