@@ -625,7 +625,7 @@ void loop() {
         if(readString=="m") inputStage=10; //enter motor setting
         if(readString=="a") inputStage=20;
         if(readString=="s") {
-          logMsg.concat("&Msg=Commanded to sleep.");
+          logMsg.concat("&Msg=Start. Commanded to sleep.");
           finish(logMsg);
         }
 
@@ -731,7 +731,7 @@ void loop() {
   #endif
 
   if(inputStage==0 && (millis()-millisStart>COLD_BOOT_SLEEP_PERIOD)) {
-    logMsg.concat("&Msg=Sleep naturally.");
+    logMsg.concat("&Msg=Start. Sleep naturally.");
     finish(logMsg);
   }
 
