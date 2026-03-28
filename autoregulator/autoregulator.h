@@ -8,8 +8,7 @@
 void setup();
 void loop();
 void finish(String logMsg);
-long moveMotor(long motorChange);
-void resetMotor();
+void moveMotor(long motorChange);
 String formatTOD(unsigned long tod, byte decPlaces);
 String formatMils(long mils, byte decPlaces);
 

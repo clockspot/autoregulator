@@ -4,8 +4,6 @@
 
 // TODO why does it wake up so erratically
 // TODO From wake 0 to 1, should still be able to calculate period vs target - TODO actually must document that wake 1 must occur correctly, neither skipped nor spurious
-// TODO at startup, move off stop, so that test move is always effective; don't monitor position, and just detect when change was less than effective
-// TODO Period to Per.
 // TODO get temp from DS3231
 // TODO get decimal from DS3231
 
@@ -71,13 +69,12 @@ unsigned long millisStart;
 
 RTC_DATA_ATTR unsigned long triggerCount = 0;
   //using unsigned long because, why not, if we have the space? Allows for up to 4,294,967,295 samples, which is enough for hourly samples for 500,000 years. There are only 8760 hourly samples in a year so could reasonably go with word (65535) if needed.
-RTC_DATA_ATTR long motorCur = 0; //where the regulator motor currently is vs MOTOR_MAX
-//TODO set up the reset button to trigger a resetMotor() during the first wake
 RTC_DATA_ATTR unsigned long refPrev = 0; //Reference time at most recent sample - millis per day (86400000). Known by trigger 2.
 RTC_DATA_ATTR long ratePrev = 0; //Rate for the period between these reference times - gain/loss in millis per real period (hour=3600000). Known by trigger 3.
 RTC_DATA_ATTR int adjRateFactor = 0; //How much an adjustment of MOTOR_STEPS should be expected to affect the rate
 RTC_DATA_ATTR int adjRegPrev = 0; //adj intended to correct rate
 RTC_DATA_ATTR int adjOffPrev = 0; //adj intended to correct offset from reference time by next sample, which will reverse this
+RTC_DATA_ATTR bool failState = 0; //if we need some human intervention, and need to stop doing things until rebooted
 
 int displayY = 0;
 
@@ -90,7 +87,7 @@ void setup() {
   //https://www.instructables.com/ESP32-Deep-Sleep-Tutorial/
   //https://simplyexplained.com/courses/programming-esp32-with-arduino/using-rtc-memory/
 
-  // counter++;
+  if(failState) goToSleep();
 
   #ifdef SHOW_SERIAL
     Serial.begin(115200);
@@ -177,8 +174,7 @@ void setup() {
     //the display contents will be built up procedurally as we go, like serial output
   #endif
 
-  motorCur = MOTOR_MAX/2; //assume it's somewhere in the middle, until it is autocalibrated
-  //If the motor is not enabled, it will just pretend to drive one and display the results
+  //TODO If the motor is not enabled, it will just pretend to drive one and display the results
   #ifdef ENABLE_MOTOR
     stepper.setSpeed(60);
   #endif
@@ -252,7 +248,6 @@ void setup() {
         Serial.println("Enter 'c' to set real-time clock.");
       #endif
       Serial.println(F("Enter 'm' to arbitrarily move motor."));
-      Serial.println(F("Enter 'a' to autocalibrate motor."));
     #endif
   
     #ifdef BATTERY_MONITOR_PIN
@@ -274,10 +269,6 @@ void setup() {
       display.setFont(&FreeSans12pt7b);
       displayY += (6+12)*1.5; display.setCursor(0, displayY);
       display.print("by @clockspot");
-
-      // displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-      // display.print("Calibrate motor: r"); //TODO
-      // display.print("Press BOOT to reset motor."); //TODO
 
       display.setFont(&FreeSans12pt7b);
       displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
@@ -325,6 +316,16 @@ void setup() {
 
   if(triggerCount==1) {
     //first wake - we have nothing
+
+    //We will instruct the motor to move down by MOTOR_STEPS, up by MOTOR_STEPS*2, and down by MOTOR_STEPS again.
+    //This ensures that the motor has at least MOTOR_STEPS range of motion in either direction,
+    //so that when we calculate the first adjRateFactor (based on MOTOR_STEPS), we get a real value.
+    //If we didn't do this, and the motor happened to be topped or bottomed out, we might get a bad value.
+    //Then we'll be able to tell if subsequent adjustments had an effect, and if not, warn about a top-out/bottom-out.
+    moveMotor(0-MOTOR_STEPS);
+    moveMotor(MOTOR_STEPS*2);
+    moveMotor(0-MOTOR_STEPS);
+
     #ifdef ENABLE_LOG
       logMsg.concat("&Msg=At next wake, we will know rate.");
     #endif
@@ -414,7 +415,8 @@ void setup() {
         display.display();
       #endif
 
-      finish(logMsg);
+      writeLog(logMsg);
+      goToSleep();
     }
 
     //TODO remove the adjoffset
@@ -455,11 +457,9 @@ void setup() {
       //Make arbitrary adjustment
 
       adjReg = (rate<=0? MOTOR_STEPS: 0-MOTOR_STEPS);
+      moveMotor(adjReg);
       #ifdef ENABLE_LOG
-        logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
-      #endif
-      adjReg = moveMotor(adjReg); //it may max out before that
-      #ifdef ENABLE_LOG
+        // logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
         logMsg.concat("&AdjRegActual="); logMsg.concat(adjReg);
         logMsg.concat("&Msg=At next rate, we will know change.");
       #endif
@@ -496,14 +496,14 @@ void setup() {
       if(triggerCount==3) {
         //This will set adjRateFactor to a positive value, expanded to if adjPrev was MOTOR_STEPS (it may have been less)
         adjRateFactor = abs(rateChg * (MOTOR_STEPS/adjRegPrev));
-        // #ifdef SHOW_SERIAL
-        //   Serial.print("Adj factor: ");
-        //   Serial.println(adjRateFactor,DEC);
-        // #endif
         #ifdef ENABLE_LOG
           logMsg.concat("&AdjFactor="); logMsg.concat(adjRateFactor);
         #endif
       }
+
+      int rateChgPct = (abs(rate)*100)/(abs(ratePrev)+adjRateFactor);
+      //Ideally, the rateChgPct will be 0% of the previous rate, reflecting a perfect adjustment. We calculate this because, if the rateChgPct is large, the motor may have topped/bottomed out - but the smaller the adjustment, the larger rateChgPct is likely to be, due to margins of error. To minimize bottom/top out detections in these cases, we'll increase the ratePrev by a fixed amount (adjRateFactor) to make the percentage more favorable for smaller adjustments.
+      //TODO if this works, how to detect subtle bottom/topouts? Track over multiple adjustments?
 
       #ifdef ENABLE_EINK
         // display.setFont(&FreeSans12pt7b);
@@ -529,19 +529,53 @@ void setup() {
         display.print("Chg ");
         display.setFont(&FreeSansBold12pt7b);
         display.print(formatMils(rateChg,2));
+        display.print(" ");
+        display.print(rateChgPct);
+        display.print("%%");
       #endif
 
-      
+      //For the fourth+ wake (where we are targeting a rate of 0),
+      //check the rateChgPct to detect motor topout/bottomout (per above),
+      //alert the user, and shut down.
+      if(triggerCount>=4 && rateChgPct>10) {
+        #ifdef ENABLE_EINK
+          display.setTextColor(EPD_RED);
+          display.setFont(&FreeSansBold12pt7b);
+          displayY += (6+12)*1.5; display.setCursor(0, displayY);
+          if(ratePrev>0) display.print("Bottomed out.");
+          else           display.print("Topped out.");
+          display.setFont(&FreeSans12pt7b);
+          displayY += (12)*1.5; display.setCursor(0, displayY);
+          if(ratePrev>0) display.print("Make positive adj");
+          else           display.print("Make negative adj");
+          displayY += (12)*1.5; display.setCursor(0, displayY);
+          display.print("and restart.");
+          display.display();
+        #endif
+        if(ratePrev>0) {
+          logMsg.concat("&Msg=Fail: Bottomed out. Rate is ");
+          logMsg.concat(rateChgPct);
+          logMsg.concat("%% of last. Make positive adj and restart.");
+        }
+        else {
+          logMsg.concat("&Msg=Fail: Topped out. Rate is ");
+          logMsg.concat(rateChgPct);
+          logMsg.concat("%% of last. Make negative adj and restart.");
+        }
+        failState = 1;
+        writeLog(logMsg);
+        goToSleep();
+      }
+      //TODO have this consider adjOffPrev as well - it will likely bottom/top out, but that's ok,
+      //as long as it moved in the right direction, we can try again; if it didn't move at all, then error
 
       //If there is an adjOffset, reverse it TODO
 
       //we finally do the magic - apply a regulation adj that is opposite of current rate
       adjReg = MOTOR_STEPS*((0-rate)/adjRateFactor);
+      moveMotor(adjReg);
       #ifdef ENABLE_LOG
-        logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
-      #endif
-      adjReg = moveMotor(adjReg); //it may max out before that
-      #ifdef ENABLE_LOG
+        // logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
         logMsg.concat("&AdjRegActual="); logMsg.concat(adjReg);
       #endif
 
@@ -599,7 +633,8 @@ void setup() {
   */
 
   //Once setup is done, finish up
-  finish(logMsg);
+  writeLog(logMsg);
+  goToSleep();
     
 } //end setup()
 
@@ -624,10 +659,10 @@ void loop() {
         if(readString=="w") inputStage=30; //stay awake
         if(readString=="c") inputStage=2; //enter clock setting
         if(readString=="m") inputStage=10; //enter motor setting
-        if(readString=="a") inputStage=20;
         if(readString=="s") {
           logMsg.concat("&Msg=Start. Commanded to sleep.");
-          finish(logMsg);
+          writeLog(logMsg);
+          goToSleep();
         }
 
         //set RTC clock and move motor
@@ -692,27 +727,21 @@ void loop() {
 
           case 10: //m - arbitrarily move motor
             Serial.println(F("Enter steps to move motor."));
-            Serial.print(F("Current position: "));
-            Serial.println(motorCur,DEC);
             inputStage++;
             break;
           case 11:
             if(incomingInt!=0) {
               //TODO could replace with moveMotor, but don't want it arbitrarily limited
+              Serial.print(F("Moving motor by "));
+              Serial.print(incomingInt,DEC);
+              Serial.println(F("... "));
               #ifdef ENABLE_MOTOR
                 stepper.step(incomingInt);
               #endif
-              motorCur+=incomingInt;
-              Serial.print(F("Current position: "));
-              Serial.println(motorCur,DEC);
+              Serial.println(F("Done. Enter another value or 's' to sleep."));
             } else {
               inputStage=99;
             }
-            break;
-          
-          case 20: //a - autocalibrate motor
-            resetMotor(); //blocking
-            inputStage=99;
             break;
 
           case 30: //w - stay awake
@@ -733,12 +762,13 @@ void loop() {
 
   if(inputStage==0 && (millis()-millisStart>COLD_BOOT_SLEEP_PERIOD)) {
     logMsg.concat("&Msg=Start. Sleep naturally.");
-    finish(logMsg);
+    writeLog(logMsg);
+    goToSleep();
   }
 
 }
 
-void finish(String logMsg) {
+void writeLog(String logMsg) {
   #ifdef SHOW_SERIAL
     Serial.println(logMsg);
   #endif
@@ -791,6 +821,9 @@ void finish(String logMsg) {
       WiFi.mode(WIFI_OFF);
     }
   #endif
+}
+
+void goToSleep() {
   #ifdef SHOW_SERIAL
     Serial.flush();
   #endif
@@ -798,44 +831,14 @@ void finish(String logMsg) {
   esp_deep_sleep_start();
 }
 
-void resetMotor() {
+void moveMotor(long motorChange) {
   #ifdef ENABLE_MOTOR
-    //Based on fixed known range of regulator motor, it will send itself all the way down, stall a while, calibrate this as 0, then rise to center
-    inputStage=20;
-    #ifdef SHOW_SERIAL
-      Serial.print(F("Moving motor to "));
-      Serial.println(0-((MOTOR_MAX*102)/100),DEC);
-    #endif
-    //Can't use moveMotor here bc it won't allow a negative movement
-    stepper.step(0-((MOTOR_MAX*102)/100));
-    motorCur = 0;
-    #ifdef SHOW_SERIAL
-      Serial.print(F("Zeroed. Now centering at "));
-      Serial.println(MOTOR_MAX/2,DEC);
-    #endif
-    moveMotor(MOTOR_MAX/2);
-  #endif
-}
-
-long moveMotor(long motorChange) {
-  #ifdef ENABLE_MOTOR
-    //uses motorCur
     if(motorChange>0) {
-      //don't move any further than MOTOR_MAX
-      //if we're at 95, and max is 100, we can't go more than 5
-      if(motorChange+motorCur > MOTOR_MAX) motorChange = MOTOR_MAX-motorCur;
       stepper.step(motorChange);
-      motorCur+=motorChange;
-      return motorChange;
     } else if(motorChange<0) {
-      //don't move any further than 0 + MOTOR_NEG_OVERDRIVE
-      //if it's at 35, and overdrive is 20, we can't go more than -15, to leave room for the overdrive
-      if(motorCur+motorChange-MOTOR_NEG_OVERDRIVE < 0) motorChange = 0-motorCur;
       stepper.step(motorChange-MOTOR_NEG_OVERDRIVE); //overdrive sends it a little too far down...
       stepper.step(MOTOR_NEG_OVERDRIVE); //then back up, to ensure each adj ends on an up movement
-      motorCur+=motorChange; //negative
-      return motorChange;
-    } else return 0;
+    }
   #endif
 }
 

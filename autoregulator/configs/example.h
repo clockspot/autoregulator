@@ -44,10 +44,6 @@
 #define MOTOR_B GPIO_NUM_17
 #define MOTOR_C GPIO_NUM_9
 #define MOTOR_D GPIO_NUM_8
-#define MOTOR_MAX 1400
-//For the DFRobot FIT0708, the max is 1600 without anything attached. Remove 50 for every mm of clearance you need back (e.g. a 3D-printed bracket attached to the bolt), plus maybe an extra 50 margin.
-//To find the max for another motor, restart the Autoregulator with Serial connected, and enter 'm'. This will enter an interactive session where you can move the motor up and down, displaying the position relative to its current 'zero'. Move it as far down as it will go (until it binds), then move it up until it almost reaches the max (but don't let it bind). Subtract the lowest value from the highest value to find the max.
-//TODO interactive discovery mode using BOOT button
 #define MOTOR_NEG_OVERDRIVE 10
 //To help ensure the weight is always positioned on top of a thread.
 
@@ -61,8 +57,9 @@
 
 //#define ENABLE_NTP_SYNC
 
-#define NETWORK_SSID "SSID"
-#define NETWORK_PASS "PASSWORD"
+#define ENABLE_WIFI
+#define WIFI_SSID "SSID"
+#define WIFI_PASS "PASSWORD"
 
 #define LOG_URL "https://website/?auth=AUTHKEY&table=TABLE"
 
