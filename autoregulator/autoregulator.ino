@@ -70,10 +70,7 @@ unsigned long millisStart;
 RTC_DATA_ATTR unsigned long triggerCount = 0;
   //using unsigned long because, why not, if we have the space? Allows for up to 4,294,967,295 samples, which is enough for hourly samples for 500,000 years. There are only 8760 hourly samples in a year so could reasonably go with word (65535) if needed.
 RTC_DATA_ATTR unsigned long refPrev = 0; //Reference time at most recent sample - millis per day (86400000). Known by trigger 2.
-RTC_DATA_ATTR long ratePrev = 0; //Rate for the period between these reference times - gain/loss in millis per real period (hour=3600000). Known by trigger 3.
-RTC_DATA_ATTR int adjRateFactor = 0; //How much an adjustment of MOTOR_STEPS should be expected to affect the rate
-RTC_DATA_ATTR int adjRegPrev = 0; //adj intended to correct rate
-RTC_DATA_ATTR int adjOffPrev = 0; //adj intended to correct offset from reference time by next sample, which will reverse this
+RTC_DATA_ATTR int motorPos = 0; //Cumulative motor position in steps from initial center position
 RTC_DATA_ATTR bool failState = 0; //if we need some human intervention, and need to stop doing things until rebooted
 
 int displayY = 0;
@@ -100,6 +97,9 @@ void setup() {
   #endif
 
   pinMode(WAKEUP_PIN, INPUT_PULLUP);
+  #ifdef CENTER_BUTTON
+    pinMode(CENTER_BUTTON, INPUT_PULLUP);
+  #endif
   gpio_hold_en(WAKEUP_PIN); //https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/gpio.html#_CPPv316rtc_gpio_hold_en10gpio_num_t
   esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, 0);
   // //TODO save further power by leveraging Deep Sleep Wake Stub?
@@ -259,9 +259,26 @@ void setup() {
       pixels.show();
     #endif
 
+    #ifdef CENTER_BUTTON
+      bool didCenter = (digitalRead(CENTER_BUTTON) == LOW);
+      if(didCenter) {
+        moveMotor(0 - MOTOR_TOTAL_RANGE); //drive to bottom hard stop regardless of starting position
+        moveMotor(MOTOR_TOTAL_RANGE / 2);  //drive to center
+        motorPos = 0;
+        triggerCount = 0;
+        refPrev = 0;
+        #ifdef ENABLE_LOG
+          logMsg.concat("&Msg=Motor centered.");
+        #endif
+        #ifdef SHOW_SERIAL
+          Serial.println(F("Motor centered."));
+        #endif
+      }
+    #endif
+
     #ifdef ENABLE_EINK
       display.setTextColor(EPD_BLACK);
-      
+
       display.setFont(&FreeSansBold12pt7b);
       displayY += (12)*1.5; display.setCursor(0, displayY);
       display.print("Autoregulator");
@@ -278,7 +295,12 @@ void setup() {
 
       display.setFont(&FreeSans12pt7b);
       displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-      display.print("Awaiting trigger.");
+      #ifdef CENTER_BUTTON
+        if(didCenter) display.print("Motor centered.");
+        else          display.print("Awaiting trigger.");
+      #else
+        display.print("Awaiting trigger.");
+      #endif
 
       display.display();
     #endif
@@ -315,17 +337,7 @@ void setup() {
   #endif
 
   if(triggerCount==1) {
-    //first wake - we have nothing
-
-    //We will instruct the motor to move down by MOTOR_STEPS, up by MOTOR_STEPS*2, and down by MOTOR_STEPS again.
-    //This ensures that the motor has at least MOTOR_STEPS range of motion in either direction,
-    //so that when we calculate the first adjRateFactor (based on MOTOR_STEPS), we get a real value.
-    //If we didn't do this, and the motor happened to be topped or bottomed out, we might get a bad value.
-    //Then we'll be able to tell if subsequent adjustments had an effect, and if not, warn about a top-out/bottom-out.
-    moveMotor(0-MOTOR_STEPS);
-    moveMotor(MOTOR_STEPS*2);
-    moveMotor(0-MOTOR_STEPS);
-
+    //first wake - no rate yet, awaiting second trigger
     #ifdef ENABLE_LOG
       logMsg.concat("&Msg=At next wake, we will know rate.");
     #endif
@@ -339,65 +351,26 @@ void setup() {
     #endif
 
   } else {
-    //second+ wake - we have refPrev and can calculate rate
+    //second+ wake - calculate rate and apply P controller
     long period = ref - refPrev; //should be ~3600000
     if(period<0) period+=86400000; //midnight rollover
 
-    //Once the clock is well-regulated, it may be many samples before the difference is appreciable,
-    //because of tolerances in the trigger (a few ticks early or late).
-    //TODO: average the samples, even if they are at a delay?
-
-    /*    
-    We want to tolerate missed real samples, so we add a multiplication factor to the target.
-    multiplication factor = (period+(target/2))/target
-    the +(target/2) turns the decimal truncation into a rounding
-    Examples:
-    one hour: (3600000+(1800000))/3600000 = 1(.5)
-    1.1 hour: (3960000+(1800000))/3600000 = 1(.6)
-    1.5 hour: (5400000+(1800000))/3600000 = 2
-    1.6 hour: (5760000+(1800000))/3600000 = 2(.1)
-    2.0 hour: (7200000+(1800000))/3600000 = 2(.5)
+    /*
+    Tolerate missed samples by rounding period to the nearest whole multiple of PERIOD_MILS.
+    +(PERIOD_MILS/2) makes the integer division round rather than truncate.
     */
     int targetx = (period+(PERIOD_MILS/2))/PERIOD_MILS;
     long target = PERIOD_MILS*targetx;
-    /*
-    We also want to discard samples that are spurious, 
-    so we discard if more than 1% out of target.
-    To calculate percentage to 4 places, we divide period by (target/10000)
-    Examples:
-    60min   = 3600000/360 = 10000 = valid   (100.00% of 1 hour)
-    59.5min = 3570000/360 =  9916 = valid   ( 99.16% of 1 hour)
-    59min   = 3540000/360 =  9830 = invalid ( 98.33% of 1 hour)
-    120min  = 7200000/720 = 10000 = valid   (100.00% of 2 hours)
-    119min  = 7140000/720 =  9916 = valid   ( 99.16% of 2 hours)
-    118min  = 7080000/720 =  9833 = invalid ( 98.33% of 2 hours)
-    */
+    // Discard if more than 1% out of target (percentage expressed to 4 decimal places)
     int accuracy = period/(target/10000);
 
     #ifdef ENABLE_LOG
       logMsg.concat("&RefPrev="); logMsg.concat(formatTOD(refPrev,1));
-      logMsg.concat("&Period="); logMsg.concat(period); // logMsg.concat(": ");
+      logMsg.concat("&Period="); logMsg.concat(period);
       logMsg.concat("&Target="); logMsg.concat(target);
       logMsg.concat("&TargetX="); logMsg.concat(targetx);
       logMsg.concat("&Accuracy="); logMsg.concat(accuracy);
-      // logMsg.concat(accuracy/100); logMsg.concat("."); //whole number
-      // logMsg.concat((accuracy%100)/10); //tenths
-      // logMsg.concat(accuracy%10); //hundredths
     #endif
-    // #ifdef ENABLE_EINK
-    //   //don't display refPrev
-    //   display.setFont(&FreeSans12pt7b);
-    //   displayY += (6+12)*1.5; display.setCursor(0, displayY);
-    //   display.print("Period ");
-    //   display.setFont(&FreeSansBold12pt7b);
-    //   display.print(accuracy/100,DEC);
-    //   display.print(F("."));
-    //   display.print((accuracy%100)/10); //tenths
-    //   display.print((accuracy%10)); //hundredths
-    //   display.print(F("% "));
-    //   display.print(targetx,DEC);
-    //   display.print(F("x"));
-    // #endif
 
     if(accuracy<9900 || accuracy>10100) {
       #ifdef ENABLE_LOG
@@ -419,185 +392,71 @@ void setup() {
       goToSleep();
     }
 
-    //TODO remove the adjoffset
+    //Rate in ms/hr: positive = clock gaining (running fast), negative = clock losing (running slow).
+    //Uses long long for intermediate to avoid overflow of 3600000^2.
+    long periodPerHour = (long)((long long)period * 3600000LL / target);
+    long rate = (long)(3600000LL * 3600000LL / (long long)periodPerHour) - 3600000L;
 
-    //Calculate rate.
-    //Rate should be per hour, so we grow or shrink period to be relative to a target of 3600000.
-
-    //Examples:
-    //Target is 60 minutes (3600000 ms)
-    //Period is 72 minutes (4320000 ms)
-    //0-(3600000-((3600000^2)/ 4320000 ))
-    //Rate is -600000 ms/h (-10 min/hr)
-
-    //Period is 62 minutes (3720000 ms)
-    //Rate is -116129 ms/h (-1.94 min/hr)
-    //a bit less than 2 mins, since the real hour hits first
-
-    //Period is 57 minutes (3420000 ms)
-    //Rate is +189473 ms/h (+3.15 min/hr)
-    //a bit more than 3 mins, since the clock hour hits first
-
-    //Target is 120 minutes (7200000 ms)
-    //Period is 119 minutes (7140000 ms)
-    //0-(3600000-((3600000^2)/ (7140000/(7200000/3600000)) ))
-    //Rate is +30252 ms/h (+0.50 sec/hr)
-
-    long periodPerHour = ((long long)period * 3600000)/target;
-
-    long rate = 0-3600000+(12960000000000/periodPerHour);
     #ifdef ENABLE_LOG
       logMsg.concat("&Rate="); logMsg.concat(rate);
     #endif
 
-    long adjReg = 0;
+    #ifdef ENABLE_EINK
+      display.setFont(&FreeSans12pt7b);
+      displayY += (6+12)*1.5; display.setCursor(0, displayY);
+      display.print("Rate ");
+      display.setFont(&FreeSansBold12pt7b);
+      display.print(formatMils(rate,2));
 
-    if(triggerCount==2) {
-      //second wake - we don't yet have ratePrev or adjRateFactor
-      //Make arbitrary adjustment
+      display.setFont(&FreeSans12pt7b);
+      displayY += (6+12)*1.5; display.setCursor(0, displayY);
+      display.print("Pos ");
+      display.setFont(&FreeSansBold12pt7b);
+      if(motorPos>=0) display.print("+");
+      display.print(motorPos);
+    #endif
 
-      adjReg = (rate<=0? MOTOR_STEPS: 0-MOTOR_STEPS);
-      moveMotor(adjReg);
+    //P controller: steps needed to null the rate.
+    //Multiply before divide to preserve integer precision; use long to handle large rates before clamping.
+    long adjSteps = ((long long)(0 - rate) * MOTOR_STEPS) / ADJ_FACTOR;
+
+    //Clamp to motor position limits and apply
+    long newPosL = (long)motorPos + adjSteps;
+    if(newPosL >  MOTOR_MAX_POS) newPosL =  MOTOR_MAX_POS;
+    if(newPosL < -MOTOR_MAX_POS) newPosL = -MOTOR_MAX_POS;
+    int newPos = (int)newPosL;
+    adjSteps = newPos - motorPos;
+
+    moveMotor(adjSteps);
+    motorPos = newPos;
+
+    #ifdef ENABLE_LOG
+      logMsg.concat("&Adj="); logMsg.concat(adjSteps);
+      logMsg.concat("&MotorPos="); logMsg.concat(motorPos);
+    #endif
+
+    #ifdef ENABLE_EINK
+      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+      display.setFont(&FreeSans12pt7b);
+      display.print("Adj ");
+      display.setFont(&FreeSansBold12pt7b);
+      if(adjSteps>=0) display.print("+");
+      display.print(adjSteps);
+    #endif
+
+    if(abs(motorPos) >= MOTOR_MAX_POS) {
       #ifdef ENABLE_LOG
-        // logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
-        logMsg.concat("&AdjRegActual="); logMsg.concat(adjReg);
-        logMsg.concat("&Msg=At next rate, we will know change.");
+        logMsg.concat("&Msg=Warning: motor at limit. Manual adj needed.");
       #endif
-
       #ifdef ENABLE_EINK
+        display.setTextColor(EPD_RED);
+        display.setFont(&FreeSans12pt7b);
         displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        display.setFont(&FreeSans12pt7b);
-        display.print("Rate ");
-        display.setFont(&FreeSansBold12pt7b);
-        display.print(formatMils(rate,2));
-
-        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-        display.setFont(&FreeSans12pt7b);
-        display.print("Adj ");
-        display.setFont(&FreeSansBold12pt7b);
-        if(adjReg>=0) display.print("+"); display.print(adjReg);
-
-        display.setFont(&FreeSans9pt7b);
-        display.print(" (test)");
-
-        display.setFont(&FreeSans12pt7b);
-        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-        display.print("At next wake,");
-
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        display.print("we'll know change.");
+        display.print("Motor at limit.");
+        displayY += (12)*1.5; display.setCursor(0, displayY);
+        display.print("Manual adj needed.");
       #endif
-
-    } else { //third+ wake - we have ratePrev so we can determine adjRateFactor from adjPrev
-
-      int rateChg = rate - ratePrev;
-
-      //TODO at first we'll set only one adjRateFactor, but we should move to averaging it
-      if(triggerCount==3) {
-        //This will set adjRateFactor to a positive value, expanded to if adjPrev was MOTOR_STEPS (it may have been less)
-        adjRateFactor = abs(rateChg * (MOTOR_STEPS/adjRegPrev));
-        #ifdef ENABLE_LOG
-          logMsg.concat("&AdjFactor="); logMsg.concat(adjRateFactor);
-        #endif
-      }
-
-      int rateChgPct = (abs(rate)*100)/(abs(ratePrev)+adjRateFactor);
-      //Ideally, the rateChgPct will be 0% of the previous rate, reflecting a perfect adjustment. We calculate this because, if the rateChgPct is large, the motor may have topped/bottomed out - but the smaller the adjustment, the larger rateChgPct is likely to be, due to margins of error. To minimize bottom/top out detections in these cases, we'll increase the ratePrev by a fixed amount (adjRateFactor) to make the percentage more favorable for smaller adjustments.
-      //TODO if this works, how to detect subtle bottom/topouts? Track over multiple adjustments?
-
-      #ifdef ENABLE_EINK
-        // display.setFont(&FreeSans12pt7b);
-        // displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        // display.print("Rate' ");
-        // display.setFont(&FreeSansBold12pt7b);
-        // display.print(formatMils(ratePrev,2));
-        
-        display.setFont(&FreeSans12pt7b);
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        display.print("Adj' ");
-        display.setFont(&FreeSansBold12pt7b);
-        if(adjRegPrev>=0) display.print("+"); display.print(adjRegPrev);
-
-        display.setFont(&FreeSans12pt7b);
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        display.print("Rate ");
-        display.setFont(&FreeSansBold12pt7b);
-        display.print(formatMils(rate,2));
-
-        display.setFont(&FreeSans12pt7b);
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
-        display.print("Chg ");
-        display.setFont(&FreeSansBold12pt7b);
-        display.print(formatMils(rateChg,2));
-        display.print(" ");
-        display.print(rateChgPct);
-        display.print("%%");
-      #endif
-
-      //For the fourth+ wake (where we are targeting a rate of 0),
-      //check the rateChgPct to detect motor topout/bottomout (per above),
-      //alert the user, and shut down.
-      if(triggerCount>=4 && rateChgPct>10) {
-        #ifdef ENABLE_EINK
-          display.setTextColor(EPD_RED);
-          display.setFont(&FreeSansBold12pt7b);
-          displayY += (6+12)*1.5; display.setCursor(0, displayY);
-          if(ratePrev>0) display.print("Bottomed out.");
-          else           display.print("Topped out.");
-          display.setFont(&FreeSans12pt7b);
-          displayY += (12)*1.5; display.setCursor(0, displayY);
-          if(ratePrev>0) display.print("Make positive adj");
-          else           display.print("Make negative adj");
-          displayY += (12)*1.5; display.setCursor(0, displayY);
-          display.print("and restart.");
-          display.display();
-        #endif
-        if(ratePrev>0) {
-          logMsg.concat("&Msg=Fail: Bottomed out. Rate is ");
-          logMsg.concat(rateChgPct);
-          logMsg.concat("%% of last. Make positive adj and restart.");
-        }
-        else {
-          logMsg.concat("&Msg=Fail: Topped out. Rate is ");
-          logMsg.concat(rateChgPct);
-          logMsg.concat("%% of last. Make negative adj and restart.");
-        }
-        failState = 1;
-        writeLog(logMsg);
-        goToSleep();
-      }
-      //TODO have this consider adjOffPrev as well - it will likely bottom/top out, but that's ok,
-      //as long as it moved in the right direction, we can try again; if it didn't move at all, then error
-
-      //If there is an adjOffset, reverse it TODO
-
-      //we finally do the magic - apply a regulation adj that is opposite of current rate
-      adjReg = MOTOR_STEPS*((0-rate)/adjRateFactor);
-      moveMotor(adjReg);
-      #ifdef ENABLE_LOG
-        // logMsg.concat("&AdjRegTarget="); logMsg.concat(adjReg);
-        logMsg.concat("&AdjRegActual="); logMsg.concat(adjReg);
-      #endif
-
-      #ifdef ENABLE_EINK
-        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-        display.setFont(&FreeSans12pt7b);
-        display.print("Adj ");
-        display.setFont(&FreeSansBold12pt7b);
-        if(adjReg>=0) display.print("+"); display.print(adjReg);
-
-        display.setFont(&FreeSans9pt7b);
-        display.print(" (");
-        display.print(formatMils(adjRateFactor,2));
-        display.print(")");
-      #endif
-
-      //TODO display targeted time at correction?
-
-    } //end third+ wake
-
-    adjRegPrev = adjReg;
-    ratePrev = rate;
+    }
 
   } //end second+ wake
 

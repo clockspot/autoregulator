@@ -27,6 +27,7 @@
 
 // #define BATTERY_MONITOR_PIN GPIO_NUM_9 //A2, when QT Py is equipped with LiPo BFF
 #define WAKEUP_PIN GPIO_NUM_5 //MI not needed to drive e-ink display
+#define CENTER_BUTTON GPIO_NUM_0 //BOOT button: hold at cold boot to center the motor
 
 #define ENABLE_EINK
 #define EPD_DC GPIO_NUM_6
@@ -38,7 +39,7 @@
 #define EINK_ROTATION 0
 
 #define ENABLE_MOTOR
-#define MOTOR_STEPS 20
+#define MOTOR_STEPS 40 //For the DFRobot FIT0708, a complete rev is 20, but 40 will give a better adj factor.
 #define MOTOR_SPEED 60
 #define MOTOR_A GPIO_NUM_18
 #define MOTOR_B GPIO_NUM_17
@@ -46,8 +47,14 @@
 #define MOTOR_D GPIO_NUM_8
 #define MOTOR_NEG_OVERDRIVE 10
 //To help ensure the weight is always positioned on top of a thread.
+#define ADJ_FACTOR 500
+//ms/hr change in clock rate per MOTOR_STEPS of adjustment. Tune to your clock:
+//start conservatively high (under-corrects but won't overshoot), then decrease if convergence is slow.
+#define MOTOR_TOTAL_RANGE 1500
+//Known total travel range of this motor/mechanism in steps.
+#define MOTOR_MAX_POS (MOTOR_TOTAL_RANGE / 2)
+//Software limit: maximum displacement from center in either direction. Alert when reached.
 
-// #define PERIOD_MILS 60000 //once per minute
 #define PERIOD_MILS 3600000 //once per hour
 
 #define COLD_BOOT_SLEEP_PERIOD 30000
