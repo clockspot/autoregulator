@@ -66,6 +66,7 @@
 #endif
 
 unsigned long millisStart;
+bool wakeValid;
 
 RTC_DATA_ATTR unsigned long triggerCount = 0;
   //using unsigned long because, why not, if we have the space? Allows for up to 4,294,967,295 samples, which is enough for hourly samples for 500,000 years. There are only 8760 hourly samples in a year so could reasonably go with word (65535) if needed.
@@ -81,23 +82,15 @@ void setup() {
 
   millisStart = millis();
 
-  // delay(500); //solves a bug of some kind
+  delay(500); //solves a bug of some kind
   //https://www.instructables.com/ESP32-Deep-Sleep-Tutorial/
   //https://simplyexplained.com/courses/programming-esp32-with-arduino/using-rtc-memory/
 
+  if(failState) goToSleep();
+
   //Verify the pin is still LOW after a settling delay.
   //A real switch closure holds LOW for many milliseconds; a noise glitch does not.
-  //Note: ref was captured from the RTC above, so this delay does not affect timing accuracy.
-  delay(50);
-  if(digitalRead(WAKEUP_PIN) == HIGH) {
-    #ifdef ENABLE_LOG
-      logMsg.concat("Wake=spurious");
-      writeLog(logMsg);
-    #endif
-    goToSleep();
-  }
-
-  if(failState) goToSleep();
+  if(digitalRead(WAKEUP_PIN) == LOW) wakeValid = true;
 
   #ifdef SHOW_SERIAL
     Serial.begin(115200);
@@ -362,11 +355,8 @@ void setup() {
   //otherwise we woke from sleep, probably by ESP_SLEEP_WAKEUP_EXT0
   //in this part, the log string is written to both serial and wifi log
 
-  //Verify the pin is still LOW after a settling delay.
-  //A real switch closure holds LOW for many milliseconds; a noise glitch does not.
-  //Note: ref was captured from the RTC above, so this delay does not affect timing accuracy.
-  delay(50);
-  if(digitalRead(WAKEUP_PIN) == HIGH) {
+  if(!wakeValid) {
+    //Did we find the wakeup pin was still LOW after a settling delay?
     #ifdef ENABLE_LOG
       logMsg.concat("Wake=spurious");
       writeLog(logMsg);
