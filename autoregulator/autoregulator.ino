@@ -80,9 +80,22 @@ unsigned long ref = 0; //We will populate this with a reference time, either fro
 void setup() {
 
   millisStart = millis();
-  delay(500); //solves a bug of some kind
+
+  // delay(500); //solves a bug of some kind
   //https://www.instructables.com/ESP32-Deep-Sleep-Tutorial/
   //https://simplyexplained.com/courses/programming-esp32-with-arduino/using-rtc-memory/
+
+  //Verify the pin is still LOW after a settling delay.
+  //A real switch closure holds LOW for many milliseconds; a noise glitch does not.
+  //Note: ref was captured from the RTC above, so this delay does not affect timing accuracy.
+  delay(50);
+  if(digitalRead(WAKEUP_PIN) == HIGH) {
+    #ifdef ENABLE_LOG
+      logMsg.concat("Wake=spurious");
+      writeLog(logMsg);
+    #endif
+    goToSleep();
+  }
 
   if(failState) goToSleep();
 
@@ -456,6 +469,7 @@ void setup() {
         displayY += (12)*1.5; display.setCursor(0, displayY);
         display.print("Manual adj needed.");
       #endif
+      failState = true;
     }
 
   } //end second+ wake
