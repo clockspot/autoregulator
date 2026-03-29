@@ -27,7 +27,6 @@
 
 // #define BATTERY_MONITOR_PIN GPIO_NUM_9 //A2, when QT Py is equipped with LiPo BFF
 #define WAKEUP_PIN GPIO_NUM_5 //MI not needed to drive e-ink display
-#define CENTER_BUTTON GPIO_NUM_0 //BOOT button: hold at cold boot to center the motor
 
 #define ENABLE_EINK
 #define EPD_DC GPIO_NUM_6
@@ -50,19 +49,18 @@
 #define ADJ_FACTOR 500
 //ms/hr change in clock rate per MOTOR_STEPS of adjustment. Tune to your clock:
 //start conservatively high (under-corrects but won't overshoot), then decrease if convergence is slow.
-#define MOTOR_TOTAL_RANGE 1500
-//Known total travel range of this motor/mechanism in steps.
-#define MOTOR_MAX_POS (MOTOR_TOTAL_RANGE / 2)
-//Software limit: maximum displacement from center in either direction. Alert when reached.
+#define MOTOR_RANGE 1500
+//Known total travel range of this motor in steps. For alerting when max has been reached.
 
 #define PERIOD_MILS 3600000 //once per hour
 
 #define COLD_BOOT_SLEEP_PERIOD 30000
 
-#define ENABLE_DS3231
-#define Wire Wire1 //to use DS3231 on STEMMA QT
+//Either a DS3231 RTC and/or WiFi+NTP sync must be enabled.
+// #define ENABLE_DS3231
+// #define Wire Wire1 //to use DS3231 on STEMMA QT
 
-//#define ENABLE_NTP_SYNC
+// #define ENABLE_NTP_SYNC
 
 #define ENABLE_WIFI
 #define WIFI_SSID "SSID"
@@ -71,8 +69,9 @@
 #define LOG_URL "https://website/?auth=AUTHKEY&table=TABLE"
 
 #define NTP_HOST "pool.ntp.org"
-//#define TZ_OFFSET_SEC -21600 //will go at midnight in this time zone
-#define TZ_OFFSET_SEC -18000 //will go at midnight in this time zone - 1am Central
-#define DST_OFFSET_SEC 3600
+#define NTP_HOST2 "time.nist.gov"
+#define TIME_ZONE "EST5EDT,M3.2.0,M11.1.0" //TZ_US_Eastern
+//#define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0" //TZ_US_Central
+//Find your time zone string in https://github.com/esp8266/Arduino/blob/master/cores/esp8266/TZ.h
 
 #endif //CONFIG_H

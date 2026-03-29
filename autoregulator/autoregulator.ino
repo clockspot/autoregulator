@@ -29,6 +29,9 @@
   // #include <Fonts/FreeSansBold9pt7b.h>
   #include <Fonts/FreeSans9pt7b.h>
   ThinkInk_154_Tricolor_Z90 display(EPD_DC, EPD_RESET, EPD_CS, SRAM_CS, EPD_BUSY, EPD_SPI);
+  #define TEXT_LINE_HT 27
+  #define TEXT_LINE_LD 9 //leading between lines for breaks
+  int displayY = 0 - TEXT_LINE_LD; //start a little off the top of the screen
 #endif
 
 #ifdef ENABLE_MOTOR
@@ -74,15 +77,13 @@ RTC_DATA_ATTR unsigned long refPrev = 0; //Reference time at most recent sample 
 RTC_DATA_ATTR int motorPos = 0; //Cumulative motor position in steps from initial center position
 RTC_DATA_ATTR bool failState = 0; //if we need some human intervention, and need to stop doing things until rebooted
 
-int displayY = 0;
-
 unsigned long ref = 0; //We will populate this with a reference time, either from RTC or NTP, and backdate it by the time it took to get it (100% of the time to when we start the request, and in the case of NTP, 50% of the time it takes to get the request back), so this will represent as accurately as possible the moment when the clock triggered it
 
 void setup() {
 
   millisStart = millis();
 
-  delay(500); //solves a bug of some kind
+  delay(500); //solves a bug of some kind - TODO does it need to be this big?
   //https://www.instructables.com/ESP32-Deep-Sleep-Tutorial/
   //https://simplyexplained.com/courses/programming-esp32-with-arduino/using-rtc-memory/
 
@@ -103,9 +104,9 @@ void setup() {
   #endif
 
   pinMode(WAKEUP_PIN, INPUT_PULLUP);
-  #ifdef CENTER_BUTTON
-    pinMode(CENTER_BUTTON, INPUT_PULLUP);
-  #endif
+  // #ifdef CENTER_BUTTON
+  //   pinMode(CENTER_BUTTON, INPUT_PULLUP);
+  // #endif
   gpio_hold_en(WAKEUP_PIN); //https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/gpio.html#_CPPv316rtc_gpio_hold_en10gpio_num_t
   esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, 0);
   // //TODO save further power by leveraging Deep Sleep Wake Stub?
@@ -176,6 +177,8 @@ void setup() {
     display.setRotation(EINK_ROTATION);
     display.clearBuffer();
     //the display contents will be built up procedurally as we go, like serial output
+    display.setTextColor(EPD_BLACK);
+    display.setFont(&FreeSans12pt7b);
   #endif
 
   //TODO If the motor is not enabled, it will just pretend to drive one and display the results
@@ -188,8 +191,11 @@ void setup() {
     WiFi.mode(WIFI_STA);
     for(int attempts=0; attempts<3; attempts++) {
       #ifdef SHOW_SERIAL
-        Serial.print(F("Connecting to WiFi SSID "));
-        Serial.println(WIFI_SSID);
+        Serial.print(F("Connecting to WiFi, attempt "));
+        Serial.print(attempts+1);
+        Serial.print(F(", SSID "));
+        Serial.print(WIFI_SSID);
+        Serial.println(F("..."));
       #endif
       WiFi.begin(WIFI_SSID, WIFI_PASS);
       int timeout = 0;
@@ -210,16 +216,34 @@ void setup() {
         //don't display anything on the e-ink
 
         #ifdef ENABLE_NTP_SYNC
-          //configTzTime uses a POSIX TZ string, which handles DST automatically.
-          #ifdef NTP_HOST2
-            configTzTime(TIME_ZONE, NTP_HOST, NTP_HOST2);
-          #else
-            configTzTime(TIME_ZONE, NTP_HOST);
-          #endif
-          struct tm timeinfo;
-          if(!getLocalTime(&timeinfo)) {
+          bool ntpSuccess = false;
+          for(int ntpAttempts=0; ntpAttempts<3; ntpAttempts++) {
             #ifdef SHOW_SERIAL
-              Serial.println(F("NTP failed."));
+              Serial.print(F("Connecting to NTP, attempt "));
+              Serial.print(ntpAttempts+1);
+              Serial.println(F("..."));
+            #endif
+            //configTzTime uses a POSIX TZ string, which handles DST automatically.
+            #ifdef NTP_HOST2
+              configTzTime(TIME_ZONE, NTP_HOST, NTP_HOST2);
+            #else
+              configTzTime(TIME_ZONE, NTP_HOST);
+            #endif
+            struct tm timeinfo;
+            if(getLocalTime(&timeinfo)) {
+              ntpSuccess = true;
+              break;
+            }
+          }
+          if(!ntpSuccess) {
+            #ifdef SHOW_SERIAL
+              Serial.println(F("NTP sync failed."));
+            #endif
+            #ifdef ENABLE_EINK
+              display.setTextColor(EPD_RED);
+              display.setCursor(0, displayY += TEXT_LINE_HT);
+              display.print("NTP sync failed.");
+              display.setTextColor(EPD_BLACK);
             #endif
           } else {
             //Snapshot millis() and gettimeofday() back-to-back so tv_usec gives the exact
@@ -261,9 +285,9 @@ void setup() {
       #endif
       #ifdef ENABLE_EINK
         display.setTextColor(EPD_RED);
-        display.setFont(&FreeSans12pt7b);
-        displayY += (12)*1.5; display.setCursor(0, displayY);
+        display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("WiFi failed.");
+        display.setTextColor(EPD_BLACK);
       #endif
       WiFi.disconnect(true);
       WiFi.mode(WIFI_OFF);
@@ -302,48 +326,44 @@ void setup() {
       pixels.show();
     #endif
 
-    #ifdef CENTER_BUTTON
-      bool didCenter = (digitalRead(CENTER_BUTTON) == LOW);
-      if(didCenter) {
-        moveMotor(0 - MOTOR_TOTAL_RANGE); //drive to bottom hard stop regardless of starting position
-        moveMotor(MOTOR_TOTAL_RANGE / 2);  //drive to center
-        motorPos = 0;
-        triggerCount = 0;
-        refPrev = 0;
-        #ifdef ENABLE_LOG
-          logMsg.concat("&Msg=Motor centered.");
-        #endif
-        #ifdef SHOW_SERIAL
-          Serial.println(F("Motor centered."));
-        #endif
-      }
-    #endif
+    // #ifdef CENTER_BUTTON
+    //   bool didCenter = (digitalRead(CENTER_BUTTON) == LOW);
+    //   if(didCenter) {
+    //     moveMotor(0 - MOTOR_TOTAL_RANGE); //drive to bottom hard stop regardless of starting position
+    //     moveMotor(MOTOR_TOTAL_RANGE / 2);  //drive to center
+    //     motorPos = 0;
+    //     triggerCount = 0;
+    //     refPrev = 0;
+    //     #ifdef ENABLE_LOG
+    //       logMsg.concat("&Msg=Motor centered.");
+    //     #endif
+    //     #ifdef SHOW_SERIAL
+    //       Serial.println(F("Motor centered."));
+    //     #endif
+    //   }
+    // #endif
 
     #ifdef ENABLE_EINK
-      display.setTextColor(EPD_BLACK);
-
+      display.setCursor(0, displayY += TEXT_LINE_HT);
       display.setFont(&FreeSansBold12pt7b);
-      displayY += (12)*1.5; display.setCursor(0, displayY);
       display.print("Autoregulator");
-
       display.setFont(&FreeSans12pt7b);
-      displayY += (6+12)*1.5; display.setCursor(0, displayY);
+
+      display.setCursor(0, displayY += TEXT_LINE_HT);
       display.print("by @clockspot");
 
-      display.setFont(&FreeSans12pt7b);
-      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+      displayY += TEXT_LINE_LD;
+
+      display.setCursor(0, displayY += TEXT_LINE_HT);
       display.print("Time ");
       display.setFont(&FreeSansBold12pt7b);
       display.print(formatTOD(ref,1));
-
       display.setFont(&FreeSans12pt7b);
-      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-      #ifdef CENTER_BUTTON
-        if(didCenter) display.print("Motor centered.");
-        else          display.print("Awaiting trigger.");
-      #else
-        display.print("Awaiting trigger.");
-      #endif
+
+      displayY += TEXT_LINE_LD;
+
+      display.setCursor(0, displayY += TEXT_LINE_HT);
+      display.print("Awaiting trigger.");
 
       display.display();
     #endif
@@ -358,7 +378,7 @@ void setup() {
   if(!wakeValid) {
     //Did we find the wakeup pin was still LOW after a settling delay?
     #ifdef ENABLE_LOG
-      logMsg.concat("Wake=spurious");
+      logMsg.concat("Msg=Spurious");
       writeLog(logMsg);
     #endif
     goToSleep();
@@ -373,19 +393,17 @@ void setup() {
   #endif
 
   #ifdef ENABLE_EINK
-    display.setTextColor(EPD_BLACK);
-    
-    display.setFont(&FreeSans12pt7b);
-    displayY += (12)*1.5; display.setCursor(0, displayY);
+    display.setCursor(0, displayY += TEXT_LINE_HT);
     display.print("Wake ");
     display.setFont(&FreeSansBold12pt7b);
     display.print(triggerCount);
-
     display.setFont(&FreeSans12pt7b);
-    displayY += (6+12)*1.5; display.setCursor(0, displayY);
+
+    display.setCursor(0, displayY += TEXT_LINE_HT);
     display.print("Time ");
     display.setFont(&FreeSansBold12pt7b);
     display.print(formatTOD(ref,1));
+    display.setFont(&FreeSans12pt7b);
   #endif
 
   if(triggerCount==1) {
@@ -394,11 +412,12 @@ void setup() {
       logMsg.concat("&Msg=At next wake, we will know rate.");
     #endif
     #ifdef ENABLE_EINK
-      display.setFont(&FreeSans12pt7b);
-      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
+      displayY += TEXT_LINE_LD;
+
+      display.setCursor(0, displayY += TEXT_LINE_HT);
       display.print("At next wake,");
 
-      displayY += (6+12)*1.5; display.setCursor(0, displayY);
+      display.setCursor(0, displayY += TEXT_LINE_HT);
       display.print("we'll know rate.");
     #endif
 
@@ -430,11 +449,12 @@ void setup() {
       #endif
 
       #ifdef ENABLE_EINK
-        display.setFont(&FreeSans12pt7b);
-        displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-        display.print("Out of range.");
+        displayY += TEXT_LINE_LD;
 
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
+        display.setTextColor(EPD_RED);
+        display.setCursor(0, displayY += TEXT_LINE_HT);
+        display.print("Out of range.");
+        display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("Ignoring trigger.");
 
         display.display();
@@ -454,28 +474,28 @@ void setup() {
     #endif
 
     #ifdef ENABLE_EINK
-      display.setFont(&FreeSans12pt7b);
-      displayY += (6+12)*1.5; display.setCursor(0, displayY);
+      display.setCursor(0, displayY += TEXT_LINE_HT);
       display.print("Rate ");
       display.setFont(&FreeSansBold12pt7b);
       display.print(formatMils(rate,2));
-
       display.setFont(&FreeSans12pt7b);
-      displayY += (6+12)*1.5; display.setCursor(0, displayY);
+
+      display.setCursor(0, displayY += TEXT_LINE_HT);
       display.print("Pos ");
       display.setFont(&FreeSansBold12pt7b);
       if(motorPos>=0) display.print("+");
       display.print(motorPos);
-    #endif
+      display.setFont(&FreeSans12pt7b);
+   #endif
 
     //P controller: steps needed to null the rate.
     //Multiply before divide to preserve integer precision; use long to handle large rates before clamping.
     long adjSteps = ((long long)(0 - rate) * MOTOR_STEPS) / ADJ_FACTOR;
 
     //Clamp to motor position limits and apply
-    long newPosL = (long)motorPos + adjSteps;
-    if(newPosL >  MOTOR_MAX_POS) newPosL =  MOTOR_MAX_POS;
-    if(newPosL < -MOTOR_MAX_POS) newPosL = -MOTOR_MAX_POS;
+    long newPosL = (long)motorPos + adjSteps; //TODO why are we calculating this as a long then downconverting to int?
+    // if(newPosL >  MOTOR_MAX_POS) newPosL =  MOTOR_MAX_POS;
+    // if(newPosL < -MOTOR_MAX_POS) newPosL = -MOTOR_MAX_POS;
     int newPos = (int)newPosL;
     adjSteps = newPos - motorPos;
 
@@ -488,24 +508,31 @@ void setup() {
     #endif
 
     #ifdef ENABLE_EINK
-      displayY += (6+6+12)*1.5; display.setCursor(0, displayY);
-      display.setFont(&FreeSans12pt7b);
+      displayY += TEXT_LINE_LD;
+        
+      display.setCursor(0, displayY += TEXT_LINE_HT);
       display.print("Adj ");
       display.setFont(&FreeSansBold12pt7b);
       if(adjSteps>=0) display.print("+");
       display.print(adjSteps);
+      display.setFont(&FreeSans12pt7b);
+      display.print(" to ");
+      display.setFont(&FreeSansBold12pt7b);
+      display.print(motorPos);
+      display.setFont(&FreeSans12pt7b);
     #endif
 
-    if(abs(motorPos) >= MOTOR_MAX_POS) {
+    if(abs(motorPos) >= MOTOR_RANGE) {
       #ifdef ENABLE_LOG
-        logMsg.concat("&Msg=Warning: motor at limit. Manual adj needed.");
+        logMsg.concat("&Msg=Error: motor at limit. Manual adj needed.");
       #endif
       #ifdef ENABLE_EINK
+        displayY += TEXT_LINE_LD;
+        
         display.setTextColor(EPD_RED);
-        display.setFont(&FreeSans12pt7b);
-        displayY += (6+12)*1.5; display.setCursor(0, displayY);
+        display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("Motor at limit.");
-        displayY += (12)*1.5; display.setCursor(0, displayY);
+        display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("Manual adj needed.");
       #endif
       failState = true;
@@ -521,28 +548,6 @@ void setup() {
 
   display.display();
 
-
-  /*
-  * sample
-      * Last = now (display)
-  * sample
-      * Prev = last, Last = now (display)
-      * Last rate = prev vs last (display)
-      * Assume rate factor 0 (display)
-      * Last adj per arbitrary (display)
-  * sample
-      * Prev = last, Last = now (display)
-      * Prev rate = last rate, Last rate = prev vs last (display)
-      * Last ∆ rate = prev rate vs last rate (display)
-      * rf0 = last ∆ rate vs last adj (display)
-      * Last adj per last rate (display)
-      * Last offadj per offset (display)
-          * Display intended time
-  * sample
-      * Prev = last, Last = now (display)
-      * Prev += offset (as though there were no offset) - remove offset
-      * The rest is the same except last adj is an average of the last three rfs
-  */
 
   //Once setup is done, finish up
   writeLog(logMsg);
@@ -618,9 +623,9 @@ void loop() {
             #ifdef ENABLE_EINK
               display.setTextColor(EPD_BLACK);
               display.setFont(&FreeSans12pt7b);
-              displayY += 12*1.5; display.setCursor(0, displayY);
+              display.setCursor(0, displayY += TEXT_LINE_HT);
               display.print("Clock set to: ");
-              displayY += (6+12)*1.5; display.setCursor(0, displayY);
+              display.setCursor(0, displayY += TEXT_LINE_HT);
               display.setFont(&FreeSansBold12pt7b);
               if(tod.hour()<10) display.print("0");
               display.print(tod.hour());
@@ -724,8 +729,7 @@ void writeLog(String logMsg) {
         #endif
         #ifdef ENABLE_EINK
           display.setTextColor(EPD_RED);
-          display.setFont(&FreeSans12pt7b);
-          displayY += (12)*1.5; display.setCursor(0, displayY);
+          display.setCursor(0, displayY += TEXT_LINE_HT);
           display.print("Logging failed.");
         #endif
       }
