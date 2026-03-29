@@ -325,6 +325,18 @@ void setup() {
   //otherwise we woke from sleep, probably by ESP_SLEEP_WAKEUP_EXT0
   //in this part, the log string is written to both serial and wifi log
 
+  //Verify the pin is still LOW after a settling delay.
+  //A real switch closure holds LOW for many milliseconds; a noise glitch does not.
+  //Note: ref was captured from the RTC above, so this delay does not affect timing accuracy.
+  delay(50);
+  if(digitalRead(WAKEUP_PIN) == HIGH) {
+    #ifdef ENABLE_LOG
+      logMsg.concat("Wake=spurious");
+      writeLog(logMsg);
+    #endif
+    goToSleep();
+  }
+
   triggerCount++;
 
   #ifdef ENABLE_LOG
