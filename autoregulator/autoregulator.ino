@@ -174,9 +174,11 @@ void setup() {
     stepper.setSpeed(60);
   #endif
 
+  bool wifiOk = false;
+  int wifiAttempts;
   #ifdef ENABLE_NTP_SYNC
     bool ntpOk = false;
-    int ntpFails = 0;
+    int ntpAttempts = 0;
   #endif
 
   #ifdef ENABLE_WIFI
@@ -186,92 +188,90 @@ void setup() {
       Serial.println(F("..."));
     #endif
     WiFi.mode(WIFI_STA);
-    int wifiFails;
-    for(wifiFails=0; wifiFails<3; wifiFails++) {
+    
+    for(wifiAttempts=0; wifiAttempts<3 && !wifiOk; wifiAttempts++) {
       WiFi.begin(WIFI_SSID, WIFI_PASS);
       int timeout = 0;
       while(WiFi.status()!=WL_CONNECTED && timeout<15) {
         timeout++; delay(1000);
       }
-      if(WiFi.status()==WL_CONNECTED){ //did it work?
-        #ifdef ENABLE_NEOPIXEL
-          pixels.fill(0x0000FF); //blue - wifi success
-          pixels.show();
-        #endif
-        #ifdef SHOW_SERIAL
-          Serial.print(F("WiFi connected after "));
-          Serial.print(wifiFails);
-          Serial.println(F("fails."));
-          //Serial.print(F("SSID: ")); Serial.println(WiFi.SSID());
-          Serial.print(F("Signal strength (RSSI): ")); Serial.print(WiFi.RSSI()); Serial.println(F(" dBm"));
-          Serial.print(F("Local IP: ")); Serial.println(WiFi.localIP());
-        #endif
-        //don't display anything on the e-ink
-
-        #ifdef ENABLE_NTP_SYNC
-          #ifdef SHOW_SERIAL
-            Serial.print(F("Syncing to NTP..."));
-          #endif
-          //configTzTime starts the SNTP process (non-blocking); call it once.
-          //POSIX TZ string handles DST automatically.
-          #ifdef NTP_HOST2
-            configTzTime(TIME_ZONE, NTP_HOST, NTP_HOST2);
-          #else
-            configTzTime(TIME_ZONE, NTP_HOST);
-          #endif
-          //getLocalTime() blocks for up to the given timeout waiting for sync.
-          //Retry a few times in case the first window is too short.
-          struct tm timeinfo;
-          for(ntpFails=0; ntpFails<3 && !ntpOk; ntpFails++) {
-            ntpOk = getLocalTime(&timeinfo, 5000);
-          }
-          if(ntpOk) {
-            #ifdef SHOW_SERIAL
-              Serial.print(F("NTP success after "));
-              Serial.print(ntpFails);
-              Serial.println(F(" fails."));
-            #endif
-            //Snapshot millis() and gettimeofday() back-to-back so tv_usec gives the exact
-            //sub-second offset with no second-boundary race.
-            unsigned long millisAtTV = millis();
-            struct timeval tv;
-            gettimeofday(&tv, NULL);
-            //Re-derive broken-down time from tv.tv_sec (already TZ-adjusted by configTzTime)
-            //so the seconds used for RTC and for ref are consistent with tv_usec.
-            struct tm *ti = localtime(&tv.tv_sec);
-            #ifdef ENABLE_DS3231
-              //Update RTC from NTP (tm_year is years since 1900; tm_mon is 0-based)
-              rtc.adjust(DateTime(ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
-                                  ti->tm_hour, ti->tm_min, ti->tm_sec));
-            #endif
-            #ifndef ENABLE_DS3231
-              //No RTC - derive ref from NTP with sub-second precision, backdated to trigger
-              unsigned long todNow = (unsigned long)ti->tm_hour * 3600000UL
-                                   + (unsigned long)ti->tm_min  * 60000UL
-                                   + (unsigned long)ti->tm_sec  * 1000UL
-                                   + (unsigned long)(tv.tv_usec  / 1000);
-              ref = 0UL - (millisAtTV - millisStart) + todNow;
-              if(ref > 86399999UL) ref += 86400000UL;
-            #endif
-          } else {
-            #ifdef SHOW_SERIAL
-              Serial.println(F("NTP sync failed."));
-            #endif
-            #ifdef ENABLE_EINK
-              display.setTextColor(EPD_RED);
-              display.setCursor(0, displayY += TEXT_LINE_HT);
-              display.print("NTP sync failed.");
-              display.setTextColor(EPD_BLACK);
-            #endif
-          }
-        #endif //end ntp sync
-
-        break; //leave wifi attempt loop
-      }
+      if(WiFi.status()==WL_CONNECTED) wifiOk = true;
     }
-    if(WiFi.status()!=WL_CONNECTED) {
+    if(wifiOk) {
+      #ifdef ENABLE_NEOPIXEL
+        pixels.fill(0x0000FF); //blue - wifi success
+        pixels.show();
+      #endif
       #ifdef SHOW_SERIAL
-        Serial.println(F("Wasn't able to connect."));
+        Serial.print(F("WiFi connected after "));
+        Serial.print(wifiAttempts);
+        Serial.println(F("attempt(s)."));
+        //Serial.print(F("SSID: ")); Serial.println(WiFi.SSID());
+        Serial.print(F("Signal strength (RSSI): ")); Serial.print(WiFi.RSSI()); Serial.println(F(" dBm"));
+        Serial.print(F("Local IP: ")); Serial.println(WiFi.localIP());
+      #endif
+      //don't display anything on the e-ink
+
+      #ifdef ENABLE_NTP_SYNC
+        #ifdef SHOW_SERIAL
+          Serial.print(F("Syncing to NTP..."));
+        #endif
+        //configTzTime starts the SNTP process (non-blocking); call it once.
+        //POSIX TZ string handles DST automatically.
+        #ifdef NTP_HOST2
+          configTzTime(TIME_ZONE, NTP_HOST, NTP_HOST2);
+        #else
+          configTzTime(TIME_ZONE, NTP_HOST);
+        #endif
+        //getLocalTime() blocks for up to the given timeout waiting for sync.
+        //Retry a few times in case the first window is too short.
+        struct tm timeinfo;
+        for(ntpAttempts=0; ntpAttempts<3 && !ntpOk; ntpAttempts++) {
+          ntpOk = getLocalTime(&timeinfo, 5000);
+        }
+        if(ntpOk) {
+          #ifdef SHOW_SERIAL
+            Serial.print(F("NTP success after "));
+            Serial.print(ntpAttempts);
+            Serial.println(F(" attempt(s)."));
+          #endif
+          //Snapshot millis() and gettimeofday() back-to-back so tv_usec gives the exact
+          //sub-second offset with no second-boundary race.
+          unsigned long millisAtTV = millis();
+          struct timeval tv;
+          gettimeofday(&tv, NULL);
+          //Re-derive broken-down time from tv.tv_sec (already TZ-adjusted by configTzTime)
+          //so the seconds used for RTC and for ref are consistent with tv_usec.
+          struct tm *ti = localtime(&tv.tv_sec);
+          #ifdef ENABLE_DS3231
+            //Update RTC from NTP (tm_year is years since 1900; tm_mon is 0-based)
+            rtc.adjust(DateTime(ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
+                                ti->tm_hour, ti->tm_min, ti->tm_sec));
+          #endif
+          #ifndef ENABLE_DS3231
+            //No RTC - derive ref from NTP with sub-second precision, backdated to trigger
+            unsigned long todNow = (unsigned long)ti->tm_hour * 3600000UL
+                                  + (unsigned long)ti->tm_min  * 60000UL
+                                  + (unsigned long)ti->tm_sec  * 1000UL
+                                  + (unsigned long)(tv.tv_usec  / 1000);
+            ref = 0UL - (millisAtTV - millisStart) + todNow;
+            if(ref > 86399999UL) ref += 86400000UL;
+          #endif
+        } else {
+          #ifdef SHOW_SERIAL
+            Serial.println(F("NTP sync failed."));
+          #endif
+          #ifdef ENABLE_EINK
+            display.setTextColor(EPD_RED);
+            display.setCursor(0, displayY += TEXT_LINE_HT);
+            display.print("NTP sync failed.");
+            display.setTextColor(EPD_BLACK);
+          #endif
+        }
+      #endif //end ntp sync
+    } else {
+      #ifdef SHOW_SERIAL
+        Serial.println(F("WiFi failed."));
       #endif
       #ifdef ENABLE_NEOPIXEL
         pixels.fill(0xFF0000); //red - no wifi success
@@ -296,8 +296,8 @@ void setup() {
     #ifdef ENABLE_NTP_SYNC
       logMsg.concat("&NTPOK=");
       logMsg.concat(ntpOk ? 1 : 0);
-      logMsg.concat("&NTPFails=");
-      logMsg.concat(ntpFails);
+      logMsg.concat("&NTPAttempts=");
+      logMsg.concat(ntpAttempts);
     #endif
   #endif
 
@@ -732,32 +732,32 @@ void writeLog(String logMsg) {
     if(WiFi.status()==WL_CONNECTED){
       HTTPClient http;
       int httpReturnCode;
-      for(int attempts=0; attempts<3; attempts++) {
-        #ifdef SHOW_SERIAL
-          Serial.print(F("Sending to log, attempt "));
-          Serial.println(attempts,DEC);
-        #endif
-        unsigned long offset = millis()-millisStart;
+      int logAttempts;
+      #ifdef SHOW_SERIAL
+        Serial.println(F("Sending to log..."));
+      #endif
+      for(int logAttempts=0; logAttempts<3 && httpReturnCode!=200; logAttempts++) {  
+        // unsigned long offset = millis()-millisStart;
         // http.begin(String(LOG_URL)+"&offset="+String(offset));
         http.begin(String(LOG_URL));
         // http.addHeader("Content-Type", "Content-Type: application/json"); //TODO? https://stackoverflow.com/a/60343909
         http.addHeader("Content-Type", "application/x-www-form-urlencoded");
         httpReturnCode = http.POST(logMsg);
-        if(httpReturnCode==200) {
-          #ifdef SHOW_SERIAL
-            Serial.println(F("Successful!"));
-          #endif
-          #ifdef ENABLE_NEOPIXEL
-            pixels.fill(0x00FF00); //green - log success
-            pixels.show();
-            delay(1000);
-          #endif
-          break; //leave attempts loop
-        }
       }
-      if(httpReturnCode!=200) {
+      if(httpReturnCode==200) {
         #ifdef SHOW_SERIAL
-          Serial.print(F("Not successful. Last HTTP code: "));
+          Serial.print(F("Log success after "));
+          Serial.print(logAttempts);
+          Serial.println(F(" attempt(s)."));
+        #endif
+        #ifdef ENABLE_NEOPIXEL
+          pixels.fill(0x00FF00); //green - log success
+          pixels.show();
+          delay(1000);
+        #endif
+      } else {
+        #ifdef SHOW_SERIAL
+          Serial.print(F("Log failed. Last HTTP code: "));
           Serial.println(httpReturnCode,DEC);
         #endif
         #ifdef ENABLE_NEOPIXEL
