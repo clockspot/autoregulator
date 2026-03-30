@@ -175,10 +175,8 @@ void setup() {
   #endif
 
   bool wifiOk = false;
-  int wifiAttempts;
   #ifdef ENABLE_NTP_SYNC
     bool ntpOk = false;
-    int ntpAttempts = 0;
   #endif
 
   #ifdef ENABLE_WIFI
@@ -189,12 +187,9 @@ void setup() {
     #endif
     WiFi.mode(WIFI_STA);
     
-    for(wifiAttempts=0; wifiAttempts<3 && !wifiOk; wifiAttempts++) {
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
-      int timeout = 0;
-      while(WiFi.status()!=WL_CONNECTED && timeout<15) {
-        timeout++; delay(1000);
-      }
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    for(int timeout=0; timeout<15 && !wifiOk; timeout++) {
+      delay(1000);
       if(WiFi.status()==WL_CONNECTED) wifiOk = true;
     }
     if(wifiOk) {
@@ -203,9 +198,7 @@ void setup() {
         pixels.show();
       #endif
       #ifdef SHOW_SERIAL
-        Serial.print(F("WiFi connected after "));
-        Serial.print(wifiAttempts);
-        Serial.println(F("attempt(s)."));
+        Serial.println(F("WiFi connected."));
         //Serial.print(F("SSID: ")); Serial.println(WiFi.SSID());
         Serial.print(F("Signal strength (RSSI): ")); Serial.print(WiFi.RSSI()); Serial.println(F(" dBm"));
         Serial.print(F("Local IP: ")); Serial.println(WiFi.localIP());
@@ -216,6 +209,10 @@ void setup() {
         #ifdef SHOW_SERIAL
           Serial.print(F("Syncing to NTP..."));
         #endif
+        //Reset sync status before starting so we know a *fresh* NTP packet was received.
+        //Without this, the ESP32 hardware RTC (which persists through deep sleep) makes
+        //sntp_get_sync_status() appear complete and getLocalTime() return stale time immediately.
+        sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
         //configTzTime starts the SNTP process (non-blocking); call it once.
         //POSIX TZ string handles DST automatically.
         #ifdef NTP_HOST2
@@ -223,17 +220,17 @@ void setup() {
         #else
           configTzTime(TIME_ZONE, NTP_HOST);
         #endif
-        //getLocalTime() blocks for up to the given timeout waiting for sync.
-        //Retry a few times in case the first window is too short.
-        struct tm timeinfo;
-        for(ntpAttempts=0; ntpAttempts<3 && !ntpOk; ntpAttempts++) {
-          ntpOk = getLocalTime(&timeinfo, 5000);
+        //Poll for sync completion rather than using getLocalTime(), which returns true
+        //based on year > 2016 — not on whether a fresh packet was actually received.
+        unsigned long ntpWaitStart = millis();
+        while(sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED
+              && (millis() - ntpWaitStart) < 15000) {
+          delay(100);
         }
+        ntpOk = (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED);
         if(ntpOk) {
           #ifdef SHOW_SERIAL
-            Serial.print(F("NTP success after "));
-            Serial.print(ntpAttempts);
-            Serial.println(F(" attempt(s)."));
+            Serial.println(F("NTP synced."));
           #endif
           //Snapshot millis() and gettimeofday() back-to-back so tv_usec gives the exact
           //sub-second offset with no second-boundary race.
@@ -296,8 +293,6 @@ void setup() {
     #ifdef ENABLE_NTP_SYNC
       logMsg.concat("&NTPOK=");
       logMsg.concat(ntpOk ? 1 : 0);
-      logMsg.concat("&NTPAttempts=");
-      logMsg.concat(ntpAttempts);
     #endif
   #endif
 
@@ -731,24 +726,15 @@ void writeLog(String logMsg) {
     //Write to online database
     if(WiFi.status()==WL_CONNECTED){
       HTTPClient http;
-      int httpReturnCode;
-      int logAttempts;
       #ifdef SHOW_SERIAL
         Serial.println(F("Sending to log..."));
       #endif
-      for(int logAttempts=0; logAttempts<3 && httpReturnCode!=200; logAttempts++) {  
-        // unsigned long offset = millis()-millisStart;
-        // http.begin(String(LOG_URL)+"&offset="+String(offset));
-        http.begin(String(LOG_URL));
-        // http.addHeader("Content-Type", "Content-Type: application/json"); //TODO? https://stackoverflow.com/a/60343909
-        http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-        httpReturnCode = http.POST(logMsg);
-      }
+      http.begin(String(LOG_URL));
+      http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+      int httpReturnCode = http.POST(logMsg);
       if(httpReturnCode==200) {
         #ifdef SHOW_SERIAL
-          Serial.print(F("Log success after "));
-          Serial.print(logAttempts);
-          Serial.println(F(" attempt(s)."));
+          Serial.println(F("Log success."));
         #endif
         #ifdef ENABLE_NEOPIXEL
           pixels.fill(0x00FF00); //green - log success
