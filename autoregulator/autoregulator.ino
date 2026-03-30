@@ -2,11 +2,6 @@
 // https://github.com/clockspot/autoregulator
 // Sketch by Luke McKenzie (luke@theclockspot.com)
 
-// TODO why does it wake up so erratically
-// TODO From wake 0 to 1, should still be able to calculate period vs target - TODO actually must document that wake 1 must occur correctly, neither skipped nor spurious
-// TODO get temp from DS3231
-// TODO get decimal from DS3231
-
 #include <arduino.h>
 #include "autoregulator.h" //specifies config
 #include "esp_sleep.h"
@@ -30,7 +25,7 @@
   #include <Fonts/FreeSans9pt7b.h>
   ThinkInk_154_Tricolor_Z90 display(EPD_DC, EPD_RESET, EPD_CS, SRAM_CS, EPD_BUSY, EPD_SPI);
   #define TEXT_LINE_HT 27
-  #define TEXT_LINE_LD 9 //leading between lines for breaks
+  #define TEXT_LINE_LD 8 //leading between lines for breaks
   int displayY = 0 - TEXT_LINE_LD; //start a little off the top of the screen
 #endif
 
@@ -40,19 +35,13 @@
 #endif
 
 #ifdef ENABLE_DS3231
-  // #include <Wire.h> //Arduino - GNU LPGL - for I2C access to DS3231
-  // #include <DS3231.h> //NorthernWidget - The Unlicense - install in your Arduino IDE
-  // DS3231 ds3231; //an object to access the ds3231 directly (temp, etc)
-  // RTClib rtc; //an object to access a snapshot of the ds3231 via rtc.now()
   #include <RTClib.h>
   RTC_DS3231 rtc;
+  // TODO get temp from DS3231
 #endif
 
 #ifdef ENABLE_WIFI
   #include <WiFi.h>
-  //TODO which of these are needed for NTP sync
-  // #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson needs version v6 or above
-  // #include <WiFiClientSecure.h>
   #include <HTTPClient.h> // Needs to be from the ESP32 platform version 3.2.0 or later, as the previous has problems with http-redirect
   #define ENABLE_LOG
 #endif
@@ -75,6 +64,7 @@ RTC_DATA_ATTR unsigned long triggerCount = 0;
   //using unsigned long because, why not, if we have the space? Allows for up to 4,294,967,295 samples, which is enough for hourly samples for 500,000 years. There are only 8760 hourly samples in a year so could reasonably go with word (65535) if needed.
 RTC_DATA_ATTR unsigned long refPrev = 0; //Reference time at most recent sample - millis per day (86400000). Known by trigger 2.
 RTC_DATA_ATTR int motorPos = 0; //Cumulative motor position in steps from initial center position
+RTC_DATA_ATTR int adjOffPrev = 0; //sync offset applied at last trigger (motor steps); always reversed at next trigger
 RTC_DATA_ATTR bool failState = 0; //if we need some human intervention, and need to stop doing things until rebooted
 
 unsigned long ref = 0; //We will populate this with a reference time, either from RTC or NTP, and backdate it by the time it took to get it (100% of the time to when we start the request, and in the case of NTP, 50% of the time it takes to get the request back), so this will represent as accurately as possible the moment when the clock triggered it
@@ -104,9 +94,6 @@ void setup() {
   #endif
 
   pinMode(WAKEUP_PIN, INPUT_PULLUP);
-  // #ifdef CENTER_BUTTON
-  //   pinMode(CENTER_BUTTON, INPUT_PULLUP);
-  // #endif
   gpio_hold_en(WAKEUP_PIN); //https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/gpio.html#_CPPv316rtc_gpio_hold_en10gpio_num_t
   esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, 0);
   // //TODO save further power by leveraging Deep Sleep Wake Stub?
@@ -326,23 +313,6 @@ void setup() {
       pixels.show();
     #endif
 
-    // #ifdef CENTER_BUTTON
-    //   bool didCenter = (digitalRead(CENTER_BUTTON) == LOW);
-    //   if(didCenter) {
-    //     moveMotor(0 - MOTOR_TOTAL_RANGE); //drive to bottom hard stop regardless of starting position
-    //     moveMotor(MOTOR_TOTAL_RANGE / 2);  //drive to center
-    //     motorPos = 0;
-    //     triggerCount = 0;
-    //     refPrev = 0;
-    //     #ifdef ENABLE_LOG
-    //       logMsg.concat("&Msg=Motor centered.");
-    //     #endif
-    //     #ifdef SHOW_SERIAL
-    //       Serial.println(F("Motor centered."));
-    //     #endif
-    //   }
-    // #endif
-
     #ifdef ENABLE_EINK
       display.setCursor(0, displayY += TEXT_LINE_HT);
       display.setFont(&FreeSansBold12pt7b);
@@ -423,13 +393,18 @@ void setup() {
 
   } else {
     //second+ wake - calculate rate and apply P controller
+
+    //Reverse the previous sync offset, if applicable.
+    //Capture the value first - it's needed below to compensate the rate calculation.
+    int prevOff = adjOffPrev;
+    moveMotor(-prevOff);
+    adjOffPrev = 0;
+
     long period = ref - refPrev; //should be ~3600000
     if(period<0) period+=86400000; //midnight rollover
 
-    /*
-    Tolerate missed samples by rounding period to the nearest whole multiple of PERIOD_MILS.
-    +(PERIOD_MILS/2) makes the integer division round rather than truncate.
-    */
+    // Tolerate missed samples by rounding period to the nearest whole multiple of PERIOD_MILS.
+    // +(PERIOD_MILS/2) makes the integer division round rather than truncate.
     int targetx = (period+(PERIOD_MILS/2))/PERIOD_MILS;
     long target = PERIOD_MILS*targetx;
     // Discard if more than 1% out of target (percentage expressed to 4 decimal places)
@@ -444,8 +419,13 @@ void setup() {
     #endif
 
     if(accuracy<9900 || accuracy>10100) {
+      //Out of reasonable sample range: probably means we manually set the clock, so we need to start over.
+      triggerCount = 0;
+      refPrev = 0;
+      adjOffPrev = 0;
+
       #ifdef ENABLE_LOG
-        logMsg.concat("&Msg=Out of range; ignoring.");
+        logMsg.concat("&Msg=Out of range. Starting over.");
       #endif
 
       #ifdef ENABLE_EINK
@@ -455,7 +435,7 @@ void setup() {
         display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("Out of range.");
         display.setCursor(0, displayY += TEXT_LINE_HT);
-        display.print("Ignoring trigger.");
+        display.print("Starting over.");
 
         display.display();
       #endif
@@ -486,16 +466,17 @@ void setup() {
       if(motorPos>=0) display.print("+");
       display.print(motorPos);
       display.setFont(&FreeSans12pt7b);
-   #endif
+    #endif
 
     //P controller: steps needed to null the rate.
+    //Subtract prevOff's known contribution from measured rate so regulation targets the true
+    //clock rate, not one artificially shifted by the previous sync offset.
     //Multiply before divide to preserve integer precision; use long to handle large rates before clamping.
-    long adjSteps = ((long long)(0 - rate) * MOTOR_STEPS) / ADJ_FACTOR;
+    long rateForReg = rate - ((long)prevOff * ADJ_FACTOR / MOTOR_STEPS);
+    long adjSteps = ((long long)(0 - rateForReg) * MOTOR_STEPS) / ADJ_FACTOR;
 
     //Clamp to motor position limits and apply
     long newPosL = (long)motorPos + adjSteps; //TODO why are we calculating this as a long then downconverting to int?
-    // if(newPosL >  MOTOR_MAX_POS) newPosL =  MOTOR_MAX_POS;
-    // if(newPosL < -MOTOR_MAX_POS) newPosL = -MOTOR_MAX_POS;
     int newPos = (int)newPosL;
     adjSteps = newPos - motorPos;
 
@@ -522,9 +503,45 @@ void setup() {
       display.setFont(&FreeSans12pt7b);
     #endif
 
+    #ifdef ENABLE_SYNC
+      //Offset: signed ms between this trigger and the nearest period boundary.
+      //Positive = triggered late = clock is slow; negative = triggered early = clock is fast.
+      //Same sign convention as rate, so the formula below needs no inversion.
+      long offset = (long)(ref % (unsigned long)PERIOD_MILS);
+      if(offset > (long)PERIOD_MILS / 2) offset -= (long)PERIOD_MILS;
+
+      //Sync adjustment uses the identical formula as regulation, targeting phase rather than rate.
+      //Clamped to ±MOTOR_RANGE/10 to limit motor excursion from this temporary adjustment.
+      long adjOff = ((long long)offset * MOTOR_STEPS) / ADJ_FACTOR;
+      int maxOff = MOTOR_RANGE / 10;
+      if(adjOff >  maxOff) adjOff =  maxOff;
+      if(adjOff < -maxOff) adjOff = -maxOff;
+
+      moveMotor((int)adjOff);
+      adjOffPrev = (int)adjOff;
+
+      #ifdef ENABLE_LOG
+        logMsg.concat("&Offset="); logMsg.concat(offset);
+        logMsg.concat("&AdjOff="); logMsg.concat(adjOff);
+      #endif
+      #ifdef ENABLE_EINK
+        display.setTextColor(EPD_BLACK);
+        display.setCursor(0, displayY += TEXT_LINE_HT);
+        display.print("Sync ");
+        display.setFont(&FreeSansBold12pt7b);
+        display.print(formatMils(offset, 1));
+        display.setFont(&FreeSans12pt7b);
+        display.print(" / ");
+        display.setFont(&FreeSansBold12pt7b);
+        if(adjOff >= 0) display.print("+");
+        display.print((int)adjOff);
+        display.setFont(&FreeSans12pt7b);
+      #endif
+    #endif
+
     if(abs(motorPos) >= MOTOR_RANGE) {
       #ifdef ENABLE_LOG
-        logMsg.concat("&Msg=Error: motor at limit. Manual adj needed.");
+        logMsg.concat("&Msg=Error: motor at limit. Fix and restart.");
       #endif
       #ifdef ENABLE_EINK
         displayY += TEXT_LINE_LD;
@@ -533,7 +550,7 @@ void setup() {
         display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("Motor at limit.");
         display.setCursor(0, displayY += TEXT_LINE_HT);
-        display.print("Manual adj needed.");
+        display.print("Fix and restart.");
       #endif
       failState = true;
     }
@@ -553,128 +570,132 @@ void setup() {
   writeLog(logMsg);
   goToSleep();
     
-} //end setup()
+}
 
 
 int inputStage = 0;
 int incomingByte = 0;
 
 void loop() {
+  //Only runs on cold start, for monitoring for serial input
 
-  //Code for setting DS3231 from terminal
   #ifdef SHOW_SERIAL
-    #ifdef ENABLE_DS3231
-      if(Serial.available()>0) {
-        String readString;
-        while(Serial.available()) {
-          char c = Serial.read();
-          if(c!=10) readString += c;
-          delay(2);
-        }
-        // Serial.print("You entered string ");
-        // Serial.println(readString);
-        if(readString=="w") inputStage=30; //stay awake
+    if(Serial.available()>0) {
+      String readString;
+      while(Serial.available()) {
+        char c = Serial.read();
+        if(c!=10) readString += c;
+        delay(2);
+      }
+      // Serial.print("You entered string ");
+      // Serial.println(readString);
+      if(readString=="w") inputStage=30; //stay awake
+      #ifdef ENABLE_DS3231
         if(readString=="c") inputStage=2; //enter clock setting
-        if(readString=="m") inputStage=10; //enter motor setting
-        if(readString=="s") {
-          logMsg.concat("&Msg=Start. Commanded to sleep.");
-          writeLog(logMsg);
-          goToSleep();
-        }
+      #endif
+      if(readString=="m") inputStage=10; //enter motor setting
+      if(readString=="s") {
+        logMsg.concat("&Msg=Start. Commanded to sleep.");
+        writeLog(logMsg);
+        goToSleep();
+      }
 
-        //set RTC clock and move motor
-        int incomingInt = readString.toInt();
+      //set RTC clock and move motor
+      int incomingInt = readString.toInt();
+      #ifdef ENABLE_DS3231
         DateTime tod;
-        switch(inputStage) {
+      #endif
+      switch(inputStage) {
 
-          case 1: //w - keep it from sleeping
-            break;
+        case 1: //w - keep it from sleeping
+          break;
 
-          case 2: //c - start setting clock
-            Serial.println("Enter hour:");
-            inputStage++;
-            break;
-          case 3:
-            rtc.adjust(DateTime(2025,6,12,incomingInt,0,0));
-            Serial.println("Enter minute:");
-            inputStage++;
-            break;
-          case 4:
-            tod = rtc.now();
-            rtc.adjust(DateTime(2025,6,12,tod.hour(),incomingInt,0));
-            Serial.println("Enter second:");
-            inputStage++;
-            break;
-          case 5:
-            tod = rtc.now();
-            rtc.adjust(DateTime(2025,6,12,tod.hour(),tod.minute(),incomingInt));
-            Serial.print("Clock set to: ");
-            tod = rtc.now();
-            Serial.print(tod.hour()%10,DEC); //hour tens
-            Serial.print(tod.hour()/10,DEC); //hour ones
-            Serial.print(":");
-            Serial.print(tod.minute()%10,DEC); //min tens
-            Serial.print(tod.minute()/10,DEC); //min ones
-            Serial.print(":");
-            Serial.print(tod.minute()%10,DEC); //sec tens
-            Serial.print(tod.minute()/10,DEC); //sec ones
-            Serial.println();
+        #ifdef ENABLE_DS3231
+        case 2: //c - start setting clock
+          Serial.println("Enter hour:");
+          inputStage++;
+          break;
+        case 3:
+          rtc.adjust(DateTime(2025,6,12,incomingInt,0,0));
+          Serial.println("Enter minute:");
+          inputStage++;
+          break;
+        case 4:
+          tod = rtc.now();
+          rtc.adjust(DateTime(2025,6,12,tod.hour(),incomingInt,0));
+          Serial.println("Enter second:");
+          inputStage++;
+          break;
+        case 5:
+          tod = rtc.now();
+          rtc.adjust(DateTime(2025,6,12,tod.hour(),tod.minute(),incomingInt));
+          Serial.print("Clock set to: ");
+          tod = rtc.now();
+          Serial.print(tod.hour()%10,DEC); //hour tens
+          Serial.print(tod.hour()/10,DEC); //hour ones
+          Serial.print(":");
+          Serial.print(tod.minute()%10,DEC); //min tens
+          Serial.print(tod.minute()/10,DEC); //min ones
+          Serial.print(":");
+          Serial.print(tod.minute()%10,DEC); //sec tens
+          Serial.print(tod.minute()/10,DEC); //sec ones
+          Serial.println();
 
-            #ifdef ENABLE_EINK
-              display.setTextColor(EPD_BLACK);
-              display.setFont(&FreeSans12pt7b);
-              display.setCursor(0, displayY += TEXT_LINE_HT);
-              display.print("Clock set to: ");
-              display.setCursor(0, displayY += TEXT_LINE_HT);
-              display.setFont(&FreeSansBold12pt7b);
-              if(tod.hour()<10) display.print("0");
-              display.print(tod.hour());
-              display.print(":");
-              if(tod.minute()<10) display.print("0");
-              display.print(tod.minute());
-              display.print(":");
-              if(tod.second()<10) display.print("0");
-              display.print(tod.second());
-              display.display();
-              //TODOTODO
+          #ifdef ENABLE_EINK
+            display.setTextColor(EPD_BLACK);
+            display.setFont(&FreeSans12pt7b);
+            display.setCursor(0, displayY += TEXT_LINE_HT);
+            display.print("Clock set to: ");
+            display.setCursor(0, displayY += TEXT_LINE_HT);
+            display.setFont(&FreeSansBold12pt7b);
+            if(tod.hour()<10) display.print("0");
+            display.print(tod.hour());
+            display.print(":");
+            if(tod.minute()<10) display.print("0");
+            display.print(tod.minute());
+            display.print(":");
+            if(tod.second()<10) display.print("0");
+            display.print(tod.second());
+            display.display();
+            //TODOTODO
+          #endif
+
+          inputStage=99;
+          break;
+        #endif
+
+        case 10: //m - arbitrarily move motor
+          Serial.println(F("Enter steps to move motor."));
+          inputStage++;
+          break;
+        case 11:
+          if(incomingInt!=0) {
+            //TODO could replace with moveMotor, but don't want it arbitrarily limited
+            Serial.print(F("Moving motor by "));
+            Serial.print(incomingInt,DEC);
+            Serial.println(F("... "));
+            #ifdef ENABLE_MOTOR
+              stepper.step(incomingInt);
             #endif
-
+            Serial.println(F("Done. Enter another value or 's' to sleep."));
+          } else {
             inputStage=99;
-            break;
+          }
+          break;
 
-          case 10: //m - arbitrarily move motor
-            Serial.println(F("Enter steps to move motor."));
-            inputStage++;
-            break;
-          case 11:
-            if(incomingInt!=0) {
-              //TODO could replace with moveMotor, but don't want it arbitrarily limited
-              Serial.print(F("Moving motor by "));
-              Serial.print(incomingInt,DEC);
-              Serial.println(F("... "));
-              #ifdef ENABLE_MOTOR
-                stepper.step(incomingInt);
-              #endif
-              Serial.println(F("Done. Enter another value or 's' to sleep."));
-            } else {
-              inputStage=99;
-            }
-            break;
+        case 30: //w - stay awake
+          Serial.println(F("Staying awake."));
+          inputStage=1;
+          break;
+        
+        case 99: //the end
+          Serial.println(F("Done. Enter 's' to sleep, or other options."));
+          inputStage=1;
+          break;
 
-          case 30: //w - stay awake
-            Serial.println(F("Staying awake."));
-            inputStage=1;
-            break;
-          
-          case 99: //the end
-            Serial.println(F("Done. Enter 's' to sleep, or other options."));
-            inputStage=1;
-            break;
-
-          default: break;
-        } //end switch inputStage
-      } //end if serial available
-    #endif
+        default: break;
+      } //end switch inputStage
+    } //end if serial available
   #endif
 
   if(inputStage==0 && (millis()-millisStart>COLD_BOOT_SLEEP_PERIOD)) {
