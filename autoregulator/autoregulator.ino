@@ -5,6 +5,7 @@
 #include <arduino.h>
 #include "autoregulator.h" //specifies config
 #include "esp_sleep.h"
+#include "esp_sntp.h"
 
 
 #ifdef ENABLE_NEOPIXEL
@@ -73,7 +74,7 @@ void setup() {
 
   millisStart = millis();
 
-  delay(500); //solves a bug of some kind - TODO does it need to be this big?
+  delay(300); //solves a bug of some kind - TODO does it need to be this big?
   //https://www.instructables.com/ESP32-Deep-Sleep-Tutorial/
   //https://simplyexplained.com/courses/programming-esp32-with-arduino/using-rtc-memory/
 
@@ -174,16 +175,15 @@ void setup() {
   #endif
 
   #ifdef ENABLE_WIFI
-    //Start wifi
+    #ifdef SHOW_SERIAL
+      Serial.print(F("Connecting to WiFi SSID "));
+      Serial.print(WIFI_SSID);
+      Serial.println(F("..."));
+    #endif
     WiFi.mode(WIFI_STA);
-    for(int attempts=0; attempts<3; attempts++) {
-      #ifdef SHOW_SERIAL
-        Serial.print(F("Connecting to WiFi, attempt "));
-        Serial.print(attempts+1);
-        Serial.print(F(", SSID "));
-        Serial.print(WIFI_SSID);
-        Serial.println(F("..."));
-      #endif
+    int wifiFails;
+    int ntpFails;
+    for(wifiFails=0; wifiFails<3; wifiFails++) {
       WiFi.begin(WIFI_SSID, WIFI_PASS);
       int timeout = 0;
       while(WiFi.status()!=WL_CONNECTED && timeout<15) {
@@ -195,7 +195,9 @@ void setup() {
           pixels.show();
         #endif
         #ifdef SHOW_SERIAL
-          Serial.println(F("Connected!"));
+          Serial.print(F("WiFi connected after "));
+          Serial.print(wifiFails);
+          Serial.println(F("fails."));
           //Serial.print(F("SSID: ")); Serial.println(WiFi.SSID());
           Serial.print(F("Signal strength (RSSI): ")); Serial.print(WiFi.RSSI()); Serial.println(F(" dBm"));
           Serial.print(F("Local IP: ")); Serial.println(WiFi.localIP());
@@ -203,13 +205,10 @@ void setup() {
         //don't display anything on the e-ink
 
         #ifdef ENABLE_NTP_SYNC
-          bool ntpSuccess = false;
-          for(int ntpAttempts=0; ntpAttempts<3; ntpAttempts++) {
-            #ifdef SHOW_SERIAL
-              Serial.print(F("Connecting to NTP, attempt "));
-              Serial.print(ntpAttempts+1);
-              Serial.println(F("..."));
-            #endif
+          #ifdef SHOW_SERIAL
+            Serial.print(F("Syncing to NTP..."));
+          #endif
+          for(ntpFails=0; ntpFails<3; ntpFails++) {
             //configTzTime uses a POSIX TZ string, which handles DST automatically.
             #ifdef NTP_HOST2
               configTzTime(TIME_ZONE, NTP_HOST, NTP_HOST2);
@@ -217,12 +216,39 @@ void setup() {
               configTzTime(TIME_ZONE, NTP_HOST);
             #endif
             struct tm timeinfo;
-            if(getLocalTime(&timeinfo)) {
-              ntpSuccess = true;
-              break;
+            getLocalTime(&timeinfo);
+            if(sntp_get_sync_status()==SNTP_SYNC_STATUS_COMPLETED) { //did it work?
+              #ifdef SHOW_SERIAL
+                Serial.print(F("NTP success after "));
+                Serial.print(ntpFails);
+                Serial.println(F("fails."));
+              #endif
+              //Snapshot millis() and gettimeofday() back-to-back so tv_usec gives the exact
+              //sub-second offset with no second-boundary race. This replaces midpoint estimation.
+              unsigned long millisAtTV = millis();
+              struct timeval tv;
+              gettimeofday(&tv, NULL);
+              //Re-derive broken-down time from tv.tv_sec (already TZ-adjusted by configTzTime)
+              //so the seconds used for RTC and for ref are consistent with tv_usec.
+              struct tm *ti = localtime(&tv.tv_sec);
+              #ifdef ENABLE_DS3231
+                //Update RTC from NTP (tm_year is years since 1900; tm_mon is 0-based)
+                rtc.adjust(DateTime(ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
+                                    ti->tm_hour, ti->tm_min, ti->tm_sec));
+              #endif
+              #ifndef ENABLE_DS3231
+                //No RTC - derive ref from NTP with sub-second precision, backdated to trigger
+                unsigned long todNow = (unsigned long)ti->tm_hour * 3600000UL
+                                    + (unsigned long)ti->tm_min  * 60000UL
+                                    + (unsigned long)ti->tm_sec  * 1000UL
+                                    + (unsigned long)(tv.tv_usec  / 1000);
+                ref = 0UL - (millisAtTV - millisStart) + todNow;
+                if(ref > 86399999UL) ref += 86400000UL;
+              #endif
+              break; //leave ntp attempt loop
             }
           }
-          if(!ntpSuccess) {
+          if(sntp_get_sync_status()!=SNTP_SYNC_STATUS_COMPLETED) {
             #ifdef SHOW_SERIAL
               Serial.println(F("NTP sync failed."));
             #endif
@@ -232,33 +258,10 @@ void setup() {
               display.print("NTP sync failed.");
               display.setTextColor(EPD_BLACK);
             #endif
-          } else {
-            //Snapshot millis() and gettimeofday() back-to-back so tv_usec gives the exact
-            //sub-second offset with no second-boundary race. This replaces midpoint estimation.
-            unsigned long millisAtTV = millis();
-            struct timeval tv;
-            gettimeofday(&tv, NULL);
-            //Re-derive broken-down time from tv.tv_sec (already TZ-adjusted by configTzTime)
-            //so the seconds used for RTC and for ref are consistent with tv_usec.
-            struct tm *ti = localtime(&tv.tv_sec);
-            #ifdef ENABLE_DS3231
-              //Update RTC from NTP (tm_year is years since 1900; tm_mon is 0-based)
-              rtc.adjust(DateTime(ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
-                                  ti->tm_hour, ti->tm_min, ti->tm_sec));
-            #endif
-            if(ref == 0) {
-              //No RTC - derive ref from NTP with sub-second precision, backdated to trigger
-              unsigned long todNow = (unsigned long)ti->tm_hour * 3600000UL
-                                   + (unsigned long)ti->tm_min  * 60000UL
-                                   + (unsigned long)ti->tm_sec  * 1000UL
-                                   + (unsigned long)(tv.tv_usec  / 1000);
-              ref = 0UL - (millisAtTV - millisStart) + todNow;
-              if(ref > 86399999UL) ref += 86400000UL;
-            }
           }
-        #endif
+        #endif //end ntp sync
 
-        break; //leave attempts loop
+        break; //leave wifi attempt loop
       }
     }
     if(WiFi.status()!=WL_CONNECTED) {
@@ -281,15 +284,29 @@ void setup() {
     }
   #endif
 
+  //Start log string
+  #ifdef ENABLE_LOG
+    logMsg.concat("Ref=");
+    logMsg.concat(formatTOD(ref,1));
+    #ifdef ENABLE_NTP_SYNC
+      logMsg.concat("&NTPOK=");
+      if(sntp_get_sync_status()==SNTP_SYNC_STATUS_COMPLETED) {
+        logMsg.concat(1);
+      } else {
+        logMsg.concat(0);
+      }
+      logMsg.concat("&NTPFails=");
+      logMsg.concat(ntpFails);
+    #endif
+  #endif
+
   //Who disturbs my slumber??
   if(esp_sleep_get_wakeup_cause()!=ESP_SLEEP_WAKEUP_EXT0) { //Cold start
     //Does this make a difference vs. ==ESP_SLEEP_WAKEUP_UNDEFINED ?
     //TODO could also just be based on triggerCount=0
     
     #ifdef ENABLE_LOG
-      logMsg.concat("Wake=0");
-      logMsg.concat("&Ref=");
-      logMsg.concat(formatTOD(ref,1));
+      logMsg.concat("&Wake=0");
     #endif
 
     #ifdef SHOW_SERIAL
@@ -348,7 +365,7 @@ void setup() {
   if(!wakeValid) {
     //Did we find the wakeup pin was still LOW after a settling delay?
     #ifdef ENABLE_LOG
-      logMsg.concat("Msg=Spurious");
+      logMsg.concat("&Msg=Spurious");
       writeLog(logMsg);
     #endif
     goToSleep();
@@ -357,9 +374,8 @@ void setup() {
   triggerCount++;
 
   #ifdef ENABLE_LOG
-    logMsg.concat("Wake=0");
-    logMsg.concat("&Ref=");
-    logMsg.concat(formatTOD(ref,1));
+    logMsg.concat("&Wake=");
+    logMsg.concat(triggerCount);
   #endif
 
   #ifdef ENABLE_EINK
