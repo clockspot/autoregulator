@@ -174,6 +174,11 @@ void setup() {
     stepper.setSpeed(60);
   #endif
 
+  #ifdef ENABLE_NTP_SYNC
+    bool ntpOk = false;
+    int ntpFails = 0;
+  #endif
+
   #ifdef ENABLE_WIFI
     #ifdef SHOW_SERIAL
       Serial.print(F("Connecting to WiFi SSID "));
@@ -182,7 +187,6 @@ void setup() {
     #endif
     WiFi.mode(WIFI_STA);
     int wifiFails;
-    int ntpFails;
     for(wifiFails=0; wifiFails<3; wifiFails++) {
       WiFi.begin(WIFI_SSID, WIFI_PASS);
       int timeout = 0;
@@ -208,47 +212,48 @@ void setup() {
           #ifdef SHOW_SERIAL
             Serial.print(F("Syncing to NTP..."));
           #endif
-          for(ntpFails=0; ntpFails<3; ntpFails++) {
-            //configTzTime uses a POSIX TZ string, which handles DST automatically.
-            #ifdef NTP_HOST2
-              configTzTime(TIME_ZONE, NTP_HOST, NTP_HOST2);
-            #else
-              configTzTime(TIME_ZONE, NTP_HOST);
-            #endif
-            struct tm timeinfo;
-            getLocalTime(&timeinfo);
-            if(sntp_get_sync_status()==SNTP_SYNC_STATUS_COMPLETED) { //did it work?
-              #ifdef SHOW_SERIAL
-                Serial.print(F("NTP success after "));
-                Serial.print(ntpFails);
-                Serial.println(F("fails."));
-              #endif
-              //Snapshot millis() and gettimeofday() back-to-back so tv_usec gives the exact
-              //sub-second offset with no second-boundary race. This replaces midpoint estimation.
-              unsigned long millisAtTV = millis();
-              struct timeval tv;
-              gettimeofday(&tv, NULL);
-              //Re-derive broken-down time from tv.tv_sec (already TZ-adjusted by configTzTime)
-              //so the seconds used for RTC and for ref are consistent with tv_usec.
-              struct tm *ti = localtime(&tv.tv_sec);
-              #ifdef ENABLE_DS3231
-                //Update RTC from NTP (tm_year is years since 1900; tm_mon is 0-based)
-                rtc.adjust(DateTime(ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
-                                    ti->tm_hour, ti->tm_min, ti->tm_sec));
-              #endif
-              #ifndef ENABLE_DS3231
-                //No RTC - derive ref from NTP with sub-second precision, backdated to trigger
-                unsigned long todNow = (unsigned long)ti->tm_hour * 3600000UL
-                                    + (unsigned long)ti->tm_min  * 60000UL
-                                    + (unsigned long)ti->tm_sec  * 1000UL
-                                    + (unsigned long)(tv.tv_usec  / 1000);
-                ref = 0UL - (millisAtTV - millisStart) + todNow;
-                if(ref > 86399999UL) ref += 86400000UL;
-              #endif
-              break; //leave ntp attempt loop
-            }
+          //configTzTime starts the SNTP process (non-blocking); call it once.
+          //POSIX TZ string handles DST automatically.
+          #ifdef NTP_HOST2
+            configTzTime(TIME_ZONE, NTP_HOST, NTP_HOST2);
+          #else
+            configTzTime(TIME_ZONE, NTP_HOST);
+          #endif
+          //getLocalTime() blocks for up to the given timeout waiting for sync.
+          //Retry a few times in case the first window is too short.
+          struct tm timeinfo;
+          for(ntpFails=0; ntpFails<3 && !ntpOk; ntpFails++) {
+            ntpOk = getLocalTime(&timeinfo, 5000);
           }
-          if(sntp_get_sync_status()!=SNTP_SYNC_STATUS_COMPLETED) {
+          if(ntpOk) {
+            #ifdef SHOW_SERIAL
+              Serial.print(F("NTP success after "));
+              Serial.print(ntpFails);
+              Serial.println(F(" fails."));
+            #endif
+            //Snapshot millis() and gettimeofday() back-to-back so tv_usec gives the exact
+            //sub-second offset with no second-boundary race.
+            unsigned long millisAtTV = millis();
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            //Re-derive broken-down time from tv.tv_sec (already TZ-adjusted by configTzTime)
+            //so the seconds used for RTC and for ref are consistent with tv_usec.
+            struct tm *ti = localtime(&tv.tv_sec);
+            #ifdef ENABLE_DS3231
+              //Update RTC from NTP (tm_year is years since 1900; tm_mon is 0-based)
+              rtc.adjust(DateTime(ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
+                                  ti->tm_hour, ti->tm_min, ti->tm_sec));
+            #endif
+            #ifndef ENABLE_DS3231
+              //No RTC - derive ref from NTP with sub-second precision, backdated to trigger
+              unsigned long todNow = (unsigned long)ti->tm_hour * 3600000UL
+                                   + (unsigned long)ti->tm_min  * 60000UL
+                                   + (unsigned long)ti->tm_sec  * 1000UL
+                                   + (unsigned long)(tv.tv_usec  / 1000);
+              ref = 0UL - (millisAtTV - millisStart) + todNow;
+              if(ref > 86399999UL) ref += 86400000UL;
+            #endif
+          } else {
             #ifdef SHOW_SERIAL
               Serial.println(F("NTP sync failed."));
             #endif
@@ -290,11 +295,7 @@ void setup() {
     logMsg.concat(formatTOD(ref,1));
     #ifdef ENABLE_NTP_SYNC
       logMsg.concat("&NTPOK=");
-      if(sntp_get_sync_status()==SNTP_SYNC_STATUS_COMPLETED) {
-        logMsg.concat(1);
-      } else {
-        logMsg.concat(0);
-      }
+      logMsg.concat(ntpOk ? 1 : 0);
       logMsg.concat("&NTPFails=");
       logMsg.concat(ntpFails);
     #endif
