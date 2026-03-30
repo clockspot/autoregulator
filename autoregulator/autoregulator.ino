@@ -223,11 +223,13 @@ void setup() {
         //Poll for sync completion rather than using getLocalTime(), which returns true
         //based on year > 2016 — not on whether a fresh packet was actually received.
         unsigned long ntpWaitStart = millis();
-        while(sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED
-              && (millis() - ntpWaitStart) < 15000) {
+        while((millis() - ntpWaitStart) < 15000) {
+          if(sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+            ntpOk = true;
+            break;
+          }
           delay(100);
         }
-        ntpOk = (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED);
         if(ntpOk) {
           #ifdef SHOW_SERIAL
             Serial.println(F("NTP synced."));
@@ -256,7 +258,7 @@ void setup() {
           #endif
         } else {
           #ifdef SHOW_SERIAL
-            Serial.println(F("NTP sync failed."));
+            Serial.print(F("NTP sync failed."));
           #endif
           #ifdef ENABLE_EINK
             display.setTextColor(EPD_RED);
