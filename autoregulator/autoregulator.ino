@@ -178,6 +178,7 @@ void setup() {
   bool wifiOk = false;
   #ifdef ENABLE_NTP_SYNC
     bool ntpOk = false;
+    unsigned long ntpWait = 0;
   #endif
 
   #ifdef ENABLE_WIFI
@@ -231,7 +232,7 @@ void setup() {
           }
           delay(100);
         }
-        unsigned long ntpWait = millis()-ntpWaitStart;
+        ntpWait = millis()-ntpWaitStart;
         if(ntpOk) {
           #ifdef SHOW_SERIAL
             Serial.print(F("NTP synced in "));
