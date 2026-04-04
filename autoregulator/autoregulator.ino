@@ -64,7 +64,8 @@ bool wakeValid;
 RTC_DATA_ATTR unsigned long triggerCount = 0;
   //using unsigned long because, why not, if we have the space? Allows for up to 4,294,967,295 samples, which is enough for hourly samples for 500,000 years. There are only 8760 hourly samples in a year so could reasonably go with word (65535) if needed.
 RTC_DATA_ATTR unsigned long refPrev = 0; //Reference time at most recent sample - millis per day (86400000). Known by trigger 2.
-RTC_DATA_ATTR int motorPos = 0; //Cumulative motor position in steps from initial center position
+RTC_DATA_ATTR long ratePrev = 0; //raw rate (ms/hr) at last trigger; used for motor stall detection
+RTC_DATA_ATTR int adjStepsPrev = 0; //regulation steps applied at last trigger; used for motor stall detection
 RTC_DATA_ATTR int adjOffPrev = 0; //sync offset applied at last trigger (motor steps); always reversed at next trigger
 RTC_DATA_ATTR bool failState = 0; //if we need some human intervention, and need to stop doing things until rebooted
 
@@ -233,7 +234,9 @@ void setup() {
         unsigned long ntpWait = millis()-ntpWaitStart;
         if(ntpOk) {
           #ifdef SHOW_SERIAL
-            Serial.println(F("NTP synced."));
+            Serial.print(F("NTP synced in "));
+            Serial.print(ntpWait);
+            Serial.println(F("ms."));
           #endif
           //Snapshot millis() and gettimeofday() back-to-back so tv_usec gives the exact
           //sub-second offset with no second-boundary race.
@@ -259,7 +262,9 @@ void setup() {
           #endif
         } else {
           #ifdef SHOW_SERIAL
-            Serial.print(F("NTP sync failed."));
+            Serial.print(F("NTP sync failed after "));
+            Serial.print(ntpWait);
+            Serial.println(F("ms."));
           #endif
           #ifdef ENABLE_EINK
             display.setTextColor(EPD_RED);
@@ -268,11 +273,11 @@ void setup() {
             display.setTextColor(EPD_BLACK);
           #endif
           #ifndef ENABLE_DS3231
-            //We have no ref, and can't do anything in this case
+            //We have no ref, and can't do anything useful this wake
             #ifdef ENABLE_LOG
-              logMsg.concat("NTPOK=0&Misc=NTPWait");
+              logMsg.concat("NTPOK=0&NTPWait=");
               logMsg.concat(ntpWait);
-              writeLog();
+              writeLog(logMsg);
             #endif
             goToSleep();
           #endif
@@ -305,6 +310,8 @@ void setup() {
     #ifdef ENABLE_NTP_SYNC
       logMsg.concat("&NTPOK=");
       logMsg.concat(ntpOk ? 1 : 0);
+      logMsg.concat("&NTPWait=");
+      logMsg.concat(ntpWait);
     #endif
   #endif
 
@@ -448,6 +455,8 @@ void setup() {
       triggerCount = 1;
       refPrev = ref;
       adjOffPrev = 0;
+      ratePrev = 0;
+      adjStepsPrev = 0;
 
       #ifdef ENABLE_LOG
         logMsg.concat("&Msg=Out of range. Starting over. Resetting as wake 1.");
@@ -484,49 +493,57 @@ void setup() {
       display.setFont(&FreeSansBold12pt7b);
       display.print(formatMils(rate,2));
       display.setFont(&FreeSans12pt7b);
-
-      display.setCursor(0, displayY += TEXT_LINE_HT);
-      display.print("Pos ");
-      display.setFont(&FreeSansBold12pt7b);
-      if(motorPos>=0) display.print("+");
-      display.print(motorPos);
-      display.setFont(&FreeSans12pt7b);
     #endif
 
     //P controller: steps needed to null the rate.
     //Subtract prevOff's known contribution from measured rate so regulation targets the true
     //clock rate, not one artificially shifted by the previous sync offset.
-    //Multiply before divide to preserve integer precision; use long to handle large rates before clamping.
+    //Multiply before divide to preserve integer precision.
     long rateForReg = rate - ((long)prevOff * ADJ_FACTOR / MOTOR_STEPS);
-    long adjSteps = ((long long)(0 - rateForReg) * MOTOR_STEPS) / ADJ_FACTOR;
-
-    //Clamp to motor position limits and apply
-    long newPosL = (long)motorPos + adjSteps;
-    int newPos = (int)newPosL;
-    adjSteps = newPos - motorPos;
+    int adjSteps = (int)(((long long)(0 - rateForReg) * MOTOR_STEPS) / ADJ_FACTOR);
 
     moveMotor(adjSteps);
-    motorPos = newPos;
 
     #ifdef ENABLE_LOG
       logMsg.concat("&Adj="); logMsg.concat(adjSteps);
-      logMsg.concat("&MotorPos="); logMsg.concat(motorPos);
     #endif
 
     #ifdef ENABLE_EINK
       displayY += TEXT_LINE_LD;
-        
+
       display.setCursor(0, displayY += TEXT_LINE_HT);
       display.print("Adj ");
       display.setFont(&FreeSansBold12pt7b);
       if(adjSteps>=0) display.print("+");
       display.print(adjSteps);
       display.setFont(&FreeSans12pt7b);
-      display.print(" to ");
-      display.setFont(&FreeSansBold12pt7b);
-      display.print(motorPos);
-      display.setFont(&FreeSans12pt7b);
     #endif
+
+    //Motor stall detection: compare expected vs actual rate change from last wake's move.
+    //Only meaningful from wake 3 onward (need one prior adjustment on record).
+    if(triggerCount >= 3) {
+      //Total steps moved last wake = regulation + sync offset (both were active during measured period)
+      int totalStepsPrev = adjStepsPrev + prevOff;
+      if(abs(totalStepsPrev) >= MOTOR_STEPS) { //only check when move was large enough to exceed noise
+        long expectedChange = (long)totalStepsPrev * ADJ_FACTOR / MOTOR_STEPS;
+        long actualChange = rate - ratePrev;
+        //Stall: actual effect < 10% of expected — motor moved far less than commanded
+        if(abs(actualChange) < abs(expectedChange) / 10) {
+          #ifdef ENABLE_LOG
+            logMsg.concat("&Msg=Error: motor stall suspected. Fix and restart.");
+          #endif
+          #ifdef ENABLE_EINK
+            displayY += TEXT_LINE_LD;
+            display.setTextColor(EPD_RED);
+            display.setCursor(0, displayY += TEXT_LINE_HT);
+            display.print("Motor stall?");
+            display.setCursor(0, displayY += TEXT_LINE_HT);
+            display.print("Fix and restart.");
+          #endif
+          failState = true;
+        }
+      }
+    }
 
     #ifdef ENABLE_SYNC
       //Offset: signed ms between this trigger and the nearest period boundary.
@@ -564,21 +581,8 @@ void setup() {
       #endif
     #endif
 
-    if(abs(motorPos) >= MOTOR_RANGE) {
-      #ifdef ENABLE_LOG
-        logMsg.concat("&Msg=Error: motor at limit. Fix and restart.");
-      #endif
-      #ifdef ENABLE_EINK
-        displayY += TEXT_LINE_LD;
-        
-        display.setTextColor(EPD_RED);
-        display.setCursor(0, displayY += TEXT_LINE_HT);
-        display.print("Motor at limit.");
-        display.setCursor(0, displayY += TEXT_LINE_HT);
-        display.print("Fix and restart.");
-      #endif
-      failState = true;
-    }
+    ratePrev = rate;
+    adjStepsPrev = adjSteps;
 
   } //end second+ wake
 
