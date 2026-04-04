@@ -230,6 +230,7 @@ void setup() {
           }
           delay(100);
         }
+        unsigned long ntpWait = millis()-ntpWaitStart;
         if(ntpOk) {
           #ifdef SHOW_SERIAL
             Serial.println(F("NTP synced."));
@@ -265,6 +266,15 @@ void setup() {
             display.setCursor(0, displayY += TEXT_LINE_HT);
             display.print("NTP sync failed.");
             display.setTextColor(EPD_BLACK);
+          #endif
+          #ifndef ENABLE_DS3231
+            //We have no ref, and can't do anything in this case
+            #ifdef ENABLE_LOG
+              logMsg.concat("NTPOK=0&Misc=NTPWait");
+              logMsg.concat(ntpWait);
+              writeLog();
+            #endif
+            goToSleep();
           #endif
         }
       #endif //end ntp sync
@@ -434,12 +444,13 @@ void setup() {
 
     if(accuracy<9900 || accuracy>10100) {
       //Out of reasonable sample range: probably means we manually set the clock, so we need to start over.
-      triggerCount = 0;
-      refPrev = 0;
+      //Since we were woken by an interrupt, we can assume this to be a first read.
+      triggerCount = 1;
+      refPrev = ref;
       adjOffPrev = 0;
 
       #ifdef ENABLE_LOG
-        logMsg.concat("&Msg=Out of range. Starting over.");
+        logMsg.concat("&Msg=Out of range. Starting over. Resetting as wake 1.");
       #endif
 
       #ifdef ENABLE_EINK
@@ -449,7 +460,7 @@ void setup() {
         display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("Out of range.");
         display.setCursor(0, displayY += TEXT_LINE_HT);
-        display.print("Starting over.");
+        display.print("Reset as wake 1.");
 
         display.display();
       #endif
@@ -490,7 +501,7 @@ void setup() {
     long adjSteps = ((long long)(0 - rateForReg) * MOTOR_STEPS) / ADJ_FACTOR;
 
     //Clamp to motor position limits and apply
-    long newPosL = (long)motorPos + adjSteps; //TODO why are we calculating this as a long then downconverting to int?
+    long newPosL = (long)motorPos + adjSteps;
     int newPos = (int)newPosL;
     adjSteps = newPos - motorPos;
 
