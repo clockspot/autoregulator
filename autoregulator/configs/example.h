@@ -39,20 +39,25 @@
 
 #define ENABLE_MOTOR
 #define MOTOR_STEPS 40 //For the DFRobot FIT0708, a complete rev is 20, but 40 will give a better adj factor.
-#define MOTOR_SPEED 60
+#define MOTOR_SPEED 30
 #define MOTOR_A GPIO_NUM_18
 #define MOTOR_B GPIO_NUM_17
 #define MOTOR_C GPIO_NUM_9
 #define MOTOR_D GPIO_NUM_8
-#define MOTOR_NEG_OVERDRIVE 10
+
 //To help ensure the weight is always positioned on top of a thread.
-#define ADJ_FACTOR 500
+#define MOTOR_NEG_OVERDRIVE 10
+
 //ms/hr change in clock rate per MOTOR_STEPS of adjustment. Tune to your clock:
 //start conservatively high (under-corrects but won't overshoot), then decrease if convergence is slow.
-#define MOTOR_RANGE 1500
+#define ADJ_FACTOR 220 //derived from observed data (~209-233 over first 3 wakes)
+
 //Known total travel range of this motor in steps. For alerting when max has been reached.
+#define MOTOR_RANGE 1500
 
 #define PERIOD_MILS 3600000 //once per hour
+
+#define ENABLE_SYNC //apply a temporary offset adjustment each trigger to phase-align with reference time
 
 #define COLD_BOOT_SLEEP_PERIOD 30000
 
@@ -71,7 +76,6 @@
 #define NTP_HOST "pool.ntp.org"
 #define NTP_HOST2 "time.nist.gov"
 #define TIME_ZONE "EST5EDT,M3.2.0,M11.1.0" //TZ_US_Eastern
-//#define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0" //TZ_US_Central
 //Find your time zone string in https://github.com/esp8266/Arduino/blob/master/cores/esp8266/TZ.h
 
 #endif //CONFIG_H

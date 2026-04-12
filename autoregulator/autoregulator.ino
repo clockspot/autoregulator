@@ -65,8 +65,8 @@ RTC_DATA_ATTR unsigned long triggerCount = 0;
   //using unsigned long because, why not, if we have the space? Allows for up to 4,294,967,295 samples, which is enough for hourly samples for 500,000 years. There are only 8760 hourly samples in a year so could reasonably go with word (65535) if needed.
 RTC_DATA_ATTR unsigned long refPrev = 0; //Reference time at most recent sample - millis per day (86400000). Known by trigger 2.
 RTC_DATA_ATTR long ratePrev = 0; //raw rate (ms/hr) at last trigger; used for motor stall detection
-RTC_DATA_ATTR int adjStepsPrev = 0; //regulation steps applied at last trigger; used for motor stall detection
-RTC_DATA_ATTR int adjOffPrev = 0; //sync offset applied at last trigger (motor steps); always reversed at next trigger
+RTC_DATA_ATTR int regAdjPrev = 0; //regulation steps applied at last trigger; used for motor stall detection
+RTC_DATA_ATTR int syncAdjPrev = 0; //sync offset applied at last trigger (motor steps); always reversed at next trigger
 RTC_DATA_ATTR bool failState = 0; //if we need some human intervention, and need to stop doing things until rebooted
 
 unsigned long ref = 0; //We will populate this with a reference time, either from RTC or NTP, and backdate it by the time it took to get it (100% of the time to when we start the request, and in the case of NTP, 50% of the time it takes to get the request back), so this will represent as accurately as possible the moment when the clock triggered it
@@ -225,7 +225,7 @@ void setup() {
         //Poll for sync completion rather than using getLocalTime(), which returns true
         //based on year > 2016 — not on whether a fresh packet was actually received.
         unsigned long ntpWaitStart = millis();
-        while((millis() - ntpWaitStart) < 15000) {
+        while((millis() - ntpWaitStart) < 30000) {
           if(sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
             ntpOk = true;
             break;
@@ -269,6 +269,7 @@ void setup() {
           #endif
           #ifdef ENABLE_EINK
             display.setTextColor(EPD_RED);
+            display.setFont(&FreeSansBold12pt7b);
             display.setCursor(0, displayY += TEXT_LINE_HT);
             display.print("NTP sync failed.");
             display.setTextColor(EPD_BLACK);
@@ -295,6 +296,7 @@ void setup() {
       #endif
       #ifdef ENABLE_EINK
         display.setTextColor(EPD_RED);
+        display.setFont(&FreeSansBold12pt7b);
         display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("WiFi failed.");
         display.setTextColor(EPD_BLACK);
@@ -426,12 +428,6 @@ void setup() {
   } else {
     //second+ wake - calculate rate and apply P controller
 
-    //Reverse the previous sync offset, if applicable.
-    //Capture the value first - it's needed below to compensate the rate calculation.
-    int prevOff = adjOffPrev;
-    moveMotor(-prevOff);
-    adjOffPrev = 0;
-
     long period = ref - refPrev; //should be ~3600000
     if(period<0) period+=86400000; //midnight rollover
 
@@ -455,18 +451,20 @@ void setup() {
       //Since we were woken by an interrupt, we can assume this to be a first read.
       triggerCount = 1;
       refPrev = ref;
-      adjOffPrev = 0;
       ratePrev = 0;
-      adjStepsPrev = 0;
+      regAdjPrev = 0; //previous correction for rate
+      syncAdjPrev = 0; //previous correction for offset
 
       #ifdef ENABLE_LOG
         logMsg.concat("&Msg=Out of range. Starting over. Resetting as wake 1.");
+        writeLog(logMsg);
       #endif
 
       #ifdef ENABLE_EINK
         displayY += TEXT_LINE_LD;
 
         display.setTextColor(EPD_RED);
+        display.setFont(&FreeSansBold12pt7b);
         display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("Out of range.");
         display.setCursor(0, displayY += TEXT_LINE_HT);
@@ -475,19 +473,25 @@ void setup() {
         display.display();
       #endif
 
-      writeLog(logMsg);
       goToSleep();
     }
 
     //Rate in ms/hr: positive = clock gaining (running fast), negative = clock losing (running slow).
     //Uses long long for intermediate to avoid overflow of 3600000^2.
     long periodPerHour = (long)((long long)period * 3600000LL / target);
-    long rate = (long)(3600000LL * 3600000LL / (long long)periodPerHour) - 3600000L;
-
+    
+    //This combined rate reflects previously applied adjustments for both rate (regulation) and offset (sync).
+    //(The latter will be reversed in the next motor move.)
+    long rateCombined = (long)(3600000LL * 3600000LL / (long long)periodPerHour) - 3600000L;
+    
+    //To find the actual regulated rate:
+    //Subtract syncAdjPrev's known rate contribution so regAdj targets only persistent drift,
+    //not the temporary rate shift caused by the sync offset that was active last period.
+    //Multiply before divide to preserve integer precision.
+    long rate = rateCombined - ((long)syncAdjPrev * ADJ_FACTOR / MOTOR_STEPS);
     #ifdef ENABLE_LOG
       logMsg.concat("&Rate="); logMsg.concat(rate);
     #endif
-
     #ifdef ENABLE_EINK
       display.setCursor(0, displayY += TEXT_LINE_HT);
       display.print("Rate ");
@@ -496,110 +500,114 @@ void setup() {
       display.setFont(&FreeSans12pt7b);
     #endif
 
-    //P controller: steps needed to null the rate.
-    //Subtract prevOff's known contribution from measured rate so regulation targets the true
-    //clock rate, not one artificially shifted by the previous sync offset.
-    //Multiply before divide to preserve integer precision.
-    long rateForReg = rate - ((long)prevOff * ADJ_FACTOR / MOTOR_STEPS);
-    int adjSteps = (int)(((long long)(0 - rateForReg) * MOTOR_STEPS) / ADJ_FACTOR);
-
-    moveMotor(adjSteps);
-
-    #ifdef ENABLE_LOG
-      logMsg.concat("&Adj="); logMsg.concat(adjSteps);
-    #endif
-
-    #ifdef ENABLE_EINK
-      displayY += TEXT_LINE_LD;
-
-      display.setCursor(0, displayY += TEXT_LINE_HT);
-      display.print("Adj ");
-      display.setFont(&FreeSansBold12pt7b);
-      if(adjSteps>=0) display.print("+");
-      display.print(adjSteps);
-      display.setFont(&FreeSans12pt7b);
-    #endif
-
-    //Motor stall detection: compare expected vs actual rate change from last wake's move.
-    //Only meaningful from wake 3 onward (need one prior adjustment on record).
+    //Motor stall detection: compare expected vs actual rate change from last wake's regulation steps.
+    //syncAdj and its reversal cancel over two periods and produce no lasting rate change, so
+    //regAdjPrev (regulation only) is the correct basis for expected rate change.
+    //Only meaningful from wake 3 onward (need one prior regAdj on record).
     if(triggerCount >= 3) {
-      //Total steps moved last wake = regulation + sync offset (both were active during measured period)
-      int totalStepsPrev = adjStepsPrev + prevOff;
-      if(abs(totalStepsPrev) >= MOTOR_STEPS) { //only check when move was large enough to exceed noise
-        long expectedChange = (long)totalStepsPrev * ADJ_FACTOR / MOTOR_STEPS;
+      if(abs(regAdjPrev) >= MOTOR_STEPS) { //only check when last move was large enough to exceed noise
+        long expectedChange = (long)regAdjPrev * ADJ_FACTOR / MOTOR_STEPS;
         long actualChange = rate - ratePrev;
         //Stall: actual effect < 10% of expected — motor moved far less than commanded
         if(abs(actualChange) < abs(expectedChange) / 10) {
+          failState = true;
+          
           #ifdef ENABLE_LOG
             logMsg.concat("&Msg=Error: motor stall suspected. Fix and restart.");
+            writeLog(logMsg);
           #endif
+          
           #ifdef ENABLE_EINK
             displayY += TEXT_LINE_LD;
+
             display.setTextColor(EPD_RED);
+            display.setFont(&FreeSansBold12pt7b);
             display.setCursor(0, displayY += TEXT_LINE_HT);
             display.print("Motor stall?");
             display.setCursor(0, displayY += TEXT_LINE_HT);
             display.print("Fix and restart.");
+
+            display.display();
           #endif
-          failState = true;
+
+          goToSleep();
         }
       }
     }
+    
+    //P controller: find a new regulation adjustment.
+    int regAdj = (int)(((long long)(0 - rate) * MOTOR_STEPS) / ADJ_FACTOR);
 
+    #ifdef ENABLE_LOG
+      logMsg.concat("&RegAdj="); logMsg.concat(regAdj);
+    #endif
+    #ifdef ENABLE_EINK
+      displayY += TEXT_LINE_LD;
+      display.setCursor(0, displayY += TEXT_LINE_HT);
+      display.print("Reg ");
+      display.setFont(&FreeSansBold12pt7b);
+      if(regAdj>=0) display.print("+");
+      display.print(regAdj);
+      display.setFont(&FreeSans12pt7b);
+    #endif
+
+    //Find a new sync adjustment to recover phase error over the next period.
+    //Offset (ms) is converted to an equivalent rate (ms/hr) before applying the same
+    //formula as regulation. This period-normalises the correction so it's proportional
+    //to how much time remains to recover it, regardless of targetx.
+    //Clamped to ±MOTOR_RANGE/10 to limit temporary motor excursion.
+    int syncAdj = 0;
     #ifdef ENABLE_SYNC
-      //Offset: signed ms between this trigger and the nearest period boundary.
+      //Signed ms between this trigger and the nearest period boundary.
       //Positive = triggered late = clock is slow; negative = triggered early = clock is fast.
-      //Same sign convention as rate, so the formula below needs no inversion.
       long offset = (long)(ref % (unsigned long)PERIOD_MILS);
       if(offset > (long)PERIOD_MILS / 2) offset -= (long)PERIOD_MILS;
-
-      //Sync adjustment uses the identical formula as regulation, targeting phase rather than rate.
-      //Clamped to ±MOTOR_RANGE/10 to limit motor excursion from this temporary adjustment.
-      long adjOff = ((long long)offset * MOTOR_STEPS) / ADJ_FACTOR;
-      int maxOff = MOTOR_RANGE / 10;
-      if(adjOff >  maxOff) adjOff =  maxOff;
-      if(adjOff < -maxOff) adjOff = -maxOff;
-
-      moveMotor((int)adjOff);
-      adjOffPrev = (int)adjOff;
-
+      long offsetAsRate = (long)((long long)offset * 3600000LL / target);
+      syncAdj = (int)(((long long)offsetAsRate * MOTOR_STEPS) / ADJ_FACTOR);
+      int maxSyncAdj = MOTOR_RANGE / 10;
+      if(syncAdj >  maxSyncAdj) syncAdj =  maxSyncAdj;
+      if(syncAdj < -maxSyncAdj) syncAdj = -maxSyncAdj;
       #ifdef ENABLE_LOG
         logMsg.concat("&Offset="); logMsg.concat(offset);
-        logMsg.concat("&AdjOff="); logMsg.concat(adjOff);
+        logMsg.concat("&SyncAdj="); logMsg.concat(syncAdj);
       #endif
       #ifdef ENABLE_EINK
-        display.setTextColor(EPD_BLACK);
+        displayY += TEXT_LINE_LD;
         display.setCursor(0, displayY += TEXT_LINE_HT);
         display.print("Sync ");
         display.setFont(&FreeSansBold12pt7b);
-        display.print(formatMils(offset, 1));
+        if(syncAdj >= 0) display.print("+");
+        display.print(syncAdj);
         display.setFont(&FreeSans12pt7b);
-        display.print(" / ");
-        display.setFont(&FreeSansBold12pt7b);
-        if(adjOff >= 0) display.print("+");
-        display.print((int)adjOff);
-        display.setFont(&FreeSans12pt7b);
+        display.print(" ");
+        if(syncAdjPrev >= 0) display.print("+");
+        display.print(syncAdjPrev);
       #endif
     #endif
 
+    //Motor move: reverses prev sync offset, applies regulation and new sync offset.
+    int totalMove = -syncAdjPrev + regAdj + syncAdj;
+    moveMotor(totalMove);
+
     ratePrev = rate;
-    adjStepsPrev = adjSteps;
+    regAdjPrev = regAdj; //stores regulation steps for next wake's stall detection (syncAdj cancels over 2 periods)
+    #ifdef ENABLE_SYNC
+      syncAdjPrev = syncAdj;
+    #endif
 
   } //end second+ wake
 
   refPrev = ref;
-
-  #ifdef SHOW_SERIAL
-    Serial.println(logMsg);
+  
+  #ifdef ENABLE_LOG
+    writeLog(logMsg);
+  #endif
+  
+  #ifdef ENABLE_EINK
+    display.display();
   #endif
 
-  display.display();
-
-
-  //Once setup is done, finish up
-  writeLog(logMsg);
   goToSleep();
-    
 }
 
 
@@ -771,6 +779,7 @@ void writeLog(String logMsg) {
         #endif
         #ifdef ENABLE_EINK
           display.setTextColor(EPD_RED);
+          display.setFont(&FreeSansBold12pt7b);
           display.setCursor(0, displayY += TEXT_LINE_HT);
           display.print("Logging failed.");
         #endif
